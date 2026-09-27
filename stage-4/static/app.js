@@ -64,7 +64,10 @@
       capture_exceeds_authorization: "The capture is greater than the remaining authorized amount.",
       stale_revision: "This payment has a newer revision. Review its history, then use the latest revision before submitting again.",
       historical_overdraft: "This change would leave a wallet short at an earlier point in time. Adjust the amount or effective time.",
-      linked_payment_immutable: "This payment belongs to a settlement or capture and cannot be corrected individually.",
+      linked_payment_immutable: "Captures and refunds cannot be corrected. Settlement members must be corrected together by an operator.",
+      refund_exceeds_payment: "This amount exceeds what remains refundable, or lowers a payment below its completed refunds.",
+      invalid_refund_target: "A refund cannot itself be refunded.",
+      incomplete_settlement: "Include every payment in the settlement before submitting this batch.",
       forbidden: "This action isn’t available to your account.",
       email_taken: "An account already uses this email. Try signing in.",
       handle_taken: "An account already uses the handle derived from this email. Use another email.",
@@ -216,7 +219,7 @@
           text("div", formatted(payment.amount), {class: "record-money", ...test(`activity-amount-${id}`)})),
         text("p", payment.note, {class: "record-note", ...test(`activity-note-${id}`)}),
         el("div", {class: "record-meta"}, text("span", direction), badge(payment.visibility), text("time", dateLabel(payment.created_at), {datetime: payment.created_at})),
-        text("p", "Original receipt", {class: "date-exact"}),
+        text("p", payment.refund_of ? "Refund · original receipt" : "Original receipt", {class: "date-exact"}),
         payment.from_user_id === me.user_id || payment.to_user_id === me.user_id ? historyLink(id) : null));
     }
     container.append(list);
@@ -456,7 +459,7 @@
         detail.replaceChildren(cardTitle("Receipt & revision history", `${payment.from_handle} → ${payment.to_handle}`),
           text("p", `Original receipt: ${formatted(original.amount)}`, {class: "original-receipt", ...test("original-receipt")}),
           text("p", `Money moved: ${payment.created_at}`, {class: "date-exact"}), text("p", payment.note, {class: "record-note"}), revisions);
-        if (payment.from_user_id === me.user_id && !payment.authorization_id && !payment.settlement_id) {
+        if (payment.from_user_id === me.user_id && !payment.authorization_id && !payment.settlement_id && !payment.refund_of) {
           const form = el("form", {novalidate: true, class: "correction-form"});
           const amount = field("correction-amount", "Corrected amount", {money: true, help: "Zero reverses the full payment. This replaces the amount; it is not an additional payment."});
           const expected = field("correction-expected", "Expected revision", {help: "Matches the current revision. A newer revision must be reviewed before retrying."});
@@ -484,25 +487,122 @@
             raw: () => [expected.input.value, amount.input.value, effective.input.value, reason.input.value], success: "Correction saved. Original receipts and existing statement snapshots remain unchanged.",
             afterOutcome: async () => { try { const updated = await api(`/payments/${encodeURIComponent(id)}/revisions`); if (current !== selection) return; draw(updated.revisions); latestRevision = updated.revisions.at(-1).revision; } catch {} }});
           detail.append(form);
-        } else detail.append(text("p", payment.from_user_id !== me.user_id ? "Only the original sender can correct this payment." : "Settlement members and captures cannot be corrected individually.", {class: "subtext"}));
+        } else detail.append(text("p", payment.from_user_id !== me.user_id ? "Only the original sender can correct this payment." : "Settlement members, captures and refunds cannot be corrected individually.", {class: "subtext"}));
+        if (payment.refund_of) detail.append(el("p", {class: "snapshot-label", ...test("refund-link")}, "Refund of ", el("a", {href: `/history?payment=${encodeURIComponent(payment.refund_of)}`}, payment.refund_of), ". This refund is an immutable receipt."));
+        else if (payment.to_user_id === me.user_id) {
+          const form = el("form", {class: "correction-form", novalidate: true});
+          const facts = el("div", {"aria-live": "polite", ...test("refund-eligibility")});
+          const amount = field("refund-amount", "Refund amount", {money: true, help: "Paid from your available funds. Previous refunds count toward the current corrected payment amount."});
+          const feedbackBox = el("div", {"aria-live": "polite"});
+          const button = text("button", "Send refund", {type: "submit", class: "primary", ...test("refund-submit")});
+          let reading = 0;
+          async function eligibility() {
+            const read = ++reading;
+            try {
+              const [updated, payments] = await Promise.all([api(`/payments/${encodeURIComponent(id)}/revisions`), allItems("/activity", "payments")]);
+              if (current !== selection || read !== reading) return;
+              draw(updated.revisions);
+              const corrected = updated.revisions.at(-1).amount;
+              const refunded = payments.filter(p => p.refund_of === id).reduce((sum, p) => sum + BigInt(p.amount), 0n);
+              const remaining = BigInt(corrected) - refunded;
+              facts.replaceChildren(el("dl", {class: "history-money"}, moneyFact("Current corrected amount", corrected, "refund-corrected"), moneyFact("Already refunded", refunded, "refund-total"), moneyFact("Remaining refundable", remaining, "refund-remaining")),
+                text("p", remaining === 0n ? "This payment has no remaining refundable amount. An unchanged successful refund can still be retried safely." : "You can refund up to the remaining amount, subject to your available funds. Refresh before deciding; another action may change it.", {class: "subtext"}));
+              await loadReceipts();
+            } catch (error) { if (current === selection && read === reading) feedback(facts, "refund-read-error", "error", message(error)); }
+          }
+          const review = text("button", "Refresh refund eligibility", {type: "button", class: "secondary", ...test("refund-refresh"), onclick: async () => { await refresh(); await eligibility(); }});
+          form.append(cardTitle("Refund this payment", "Return money to the original sender. The original receipt stays unchanged; requests and authorizations stay closed."), facts, amount.wrap,
+            el("div", {class: "record-actions"}, button, review), feedbackBox);
+          wireWrite(form, {name: `refund-${id}`, button, feedback: feedbackBox, errorId: "refund-error", uncertainId: "refund-uncertain", path: () => `/payments/${encodeURIComponent(id)}/refunds`,
+            body: () => ({amount: minor(amount.input.value)}), raw: () => [amount.input.value], success: "Refund sent. The original receipt and saved statements remain unchanged.",
+            afterOutcome: async () => { await eligibility(); }});
+          detail.append(form); await eligibility();
+        }
         detail.focus();
       } catch (error) { if (current === selection) feedback(detail, "history-error", "error", message(error)); }
     }
-    refs.startTemporal = async () => {
+    async function loadReceipts() {
       try {
         const payments = (await allItems("/activity", "payments")).filter(p => p.from_user_id === me.user_id || p.to_user_id === me.user_id);
         list.replaceChildren(...payments.map(p => el("article", {class: "record"},
           el("div", {class: "record-top"}, text("strong", `${p.from_handle} → ${p.to_handle}`), text("span", formatted(p.amount), {class: "record-money"})),
-          text("p", p.note, {class: "record-note"}), text("p", `Original · ${dateLabel(p.created_at)}`, {class: "subtext"}),
+          text("p", p.note, {class: "record-note"}), text("p", `${p.refund_of ? "Refund" : "Original"} · ${dateLabel(p.created_at)}`, {class: "subtext"}),
           text("button", "View receipt & history", {type: "button", class: "secondary", ...test(`history-open-${p.payment_id}`), onclick: () => open(p)}))));
         if (!payments.length) list.append(empty("empty-history", "No payment history yet", "Your own sent and received payments will appear here."));
+        return payments;
+      } catch (error) { feedback(status, "history-error", "error", message(error)); return []; }
+    }
+    refs.startTemporal = async () => {
+        const payments = await loadReceipts();
         const requested = new URLSearchParams(location.search).get("payment");
         const payment = payments.find(p => p.payment_id === requested);
         if (payment) await open(payment);
         else if (requested) feedback(status, "history-error", "error", "This receipt is not available to your account.");
-      } catch (error) { feedback(status, "history-error", "error", message(error)); }
     };
     return el("div", {class: "column"}, temporalBalanceScreen(), el("div", {class: "workspace history-workspace"}, section, detail));
+  }
+
+  function operationsScreen() {
+    const section = el("section", {class: "card"});
+    const form = el("form", {novalidate: true});
+    const rowsBox = el("div", {class: "column", ...test("batch-rows")});
+    const status = el("div", {"aria-live": "polite"});
+    const result = el("section", {"aria-live": "polite", ...test("batch-result")});
+    const rows = []; let sequence = 0;
+    const submit = text("button", "Apply corrections together", {type: "submit", class: "primary", ...test("batch-submit")});
+    const add = text("button", "Add correction", {type: "button", class: "secondary", ...test("batch-add"), onclick: () => addRow(true)});
+    function changed() { form.dispatchEvent(new Event("input", {bubbles: true})); }
+    function controls() {
+      add.disabled = rows.length >= 32;
+      rows.forEach((row, index) => { row.legend.textContent = `Correction ${index + 1}`; row.remove.disabled = rows.length <= 1; });
+    }
+    function addRow(focus = false) {
+      if (rows.length >= 32) return;
+      const id = ++sequence;
+      const payment = field(`batch-payment-${id}`, "Payment ID", {help: "Use the ID from the payment or settlement receipt."});
+      const revision = field(`batch-revision-${id}`, "Expected revision", {help: "The current revision number for this payment."}); revision.input.value = "1";
+      const amount = field(`batch-amount-${id}`, "Corrected amount", {money: true, help: "Replacement amount. Zero reverses the payment."});
+      const effective = timeField(`batch-effective-${id}`, "Effective at", false);
+      const reason = field(`batch-reason-${id}`, "Reason", {wide: true, multiline: true, help: "Required · 1–200 characters"});
+      const legend = text("legend", "Correction", {class: "batch-legend"});
+      const box = el("fieldset", {class: "batch-row", ...test(`batch-row-${id}`)}, legend, el("div", {class: "fields"}, payment.wrap, revision.wrap, amount.wrap, effective.wrap, reason.wrap));
+      const row = {payment, revision, amount, effective, reason, legend, box};
+      row.remove = text("button", "Remove correction", {type: "button", class: "secondary", ...test(`batch-remove-${id}`), onclick: () => {
+        if (rows.length <= 1) return;
+        const index = rows.indexOf(row); rows.splice(index, 1); box.remove(); controls(); changed();
+        (rows[Math.min(index, rows.length - 1)]?.payment.input || add).focus();
+      }});
+      box.append(el("div", {class: "record-actions"}, row.remove)); rows.push(row); rowsBox.append(box); controls();
+      if (focus) { changed(); payment.input.focus(); }
+    }
+    section.append(cardTitle("Batch corrections", "For settlement operators. All corrections are applied together, or none are applied."),
+      text("p", "Operator permission is required. Enter the payment IDs and current revisions from your records; operator access does not reveal another person’s private history.", {class: "snapshot-label", ...test("batch-role")}),
+      text("p", "Include every member of any settlement you correct, using the same effective instant. Captures and refunds cannot be corrected. Completed refunds set the minimum corrected amount.", {class: "subtext"}), form, result);
+    form.append(rowsBox, el("div", {class: "record-actions"}, add, submit), status);
+    addRow();
+    wireWrite(form, {name: "batch", button: submit, feedback: status, errorId: "batch-error", uncertainId: "batch-uncertain", path: () => "/correction-batches",
+      raw: () => rows.map(row => [row.payment.input.value, row.revision.input.value, row.amount.input.value, row.effective.input.value, row.reason.input.value]),
+      body: () => {
+        if (!rows.length || rows.length > 32) throw new Error("Include between 1 and 32 corrections.");
+        const seen = new Set();
+        return {corrections: rows.map(row => {
+          const payment_id = row.payment.input.value.trim(), expected = row.revision.input.value.trim(), reason = row.reason.input.value;
+          if (!payment_id || payment_id.length > 64) throw new Error("Enter a payment ID of 1–64 characters.");
+          if (seen.has(payment_id)) throw new Error("Each payment can appear only once in a batch."); seen.add(payment_id);
+          if (!/^[0-9]+$/.test(expected) || !Number.isSafeInteger(Number(expected)) || Number(expected) < 1) throw new Error("Expected revision must be a positive whole number.");
+          if (!Array.from(reason).length || Array.from(reason).length > 200) throw new Error("Add a reason of 1–200 characters for each correction.");
+          return {payment_id, expected_revision: Number(expected), amount: minor(row.amount.input.value, true), effective_at: instant(row.effective.input.value, "Effective at", false), reason};
+        })};
+      }, success: "Batch saved. Original receipts and previously saved statement snapshots remain unchanged.",
+      afterOutcome: async (outcome, data) => {
+        if (outcome !== "success") return;
+        result.replaceChildren(cardTitle("Saved batch receipt", "Revisions are listed in the order submitted. This receipt stays unchanged on a retry."),
+          text("p", `Batch: ${data.correction_batch_id}`, {class: "date-exact"}), text("p", `Recorded together: ${data.recorded_at}`, {class: "date-exact", ...test("batch-recorded")}),
+          el("ol", {class: "record-list batch-results", ...test("batch-revisions")}, data.revisions.map((revision, index) => el("li", {class: "record", ...test(`batch-result-${index + 1}`)},
+            text("strong", `${revision.payment_id} · Revision ${revision.revision}`, {class: "date-exact"}), text("p", formatted(revision.amount), {class: "record-money"}),
+            text("p", `Effective: ${revision.effective_at}`, {class: "date-exact"}), text("p", `Recorded: ${revision.recorded_at}`, {class: "date-exact"}), text("p", revision.reason, {class: "record-note"})))));
+      }});
+    return section;
   }
 
   async function allItems(path, key) {
@@ -540,7 +640,7 @@
     refs.loading = el("p", {class: "page-loading", role: "status"});
     refs.main = el("main", {id: "main", tabindex: "-1"});
     const nav = el("nav", {class: "nav", "aria-label": "Main navigation"});
-    for (const [href, label, symbol] of [["/", "Wallet", "◈"], ["/requests", "Requests", "↔"], ["/split", "Split a bill", "÷"], ["/authorizations", "Authorizations", "◷"], ["/statements", "Statements", "≡"], ["/history", "History", "↶"]]) {
+    for (const [href, label, symbol] of [["/", "Wallet", "◈"], ["/requests", "Requests", "↔"], ["/split", "Split a bill", "÷"], ["/authorizations", "Authorizations", "◷"], ["/statements", "Statements", "≡"], ["/history", "History", "↶"], ["/operations", "Operations", "≋"]]) {
       nav.append(el("a", {href, ...(route === href ? {"aria-current": "page"} : {})}, text("span", symbol, {class: "nav-symbol", "aria-hidden": "true"}), label));
     }
     root.replaceChildren(el("div", {class: "shell"}, el("aside", {class: "sidebar"},
@@ -579,7 +679,8 @@
       "/split": ["Split a bill", "Keep the good part of sharing. We’ll handle the arithmetic."],
       "/authorizations": ["Authorizations", "Money set aside. Ready to collect, or release when plans change."],
       "/statements": ["Statements", "Your money movements, with the full story behind the numbers."],
-      "/history": ["History & corrections", "Look back with confidence. Original receipts always stay original."]};
+      "/history": ["History & corrections", "Look back with confidence. Original receipts always stay original."],
+      "/operations": ["Operations", "Apply related corrections together, with every original receipt preserved."]};
     const [title, caption] = titles[route] || titles["/"];
     const refreshButton = text("button", "↻ Refresh", {type: "button", class: "secondary", ...test("wallet-refresh"), onclick: refresh});
     refs.main.append(el("section", {class: "heading"}, el("div", {}, text("p", "POCKETFUL / " + (route === "/" ? "OVERVIEW" : title.toUpperCase()), {class: "eyebrow"}), text("h1", title), text("p", caption, {class: "subtext"})), refreshButton), refs.global, refs.loading);
@@ -603,6 +704,7 @@
     }
     else if (route === "/statements") refs.main.append(statementScreen());
     else if (route === "/history") refs.main.append(historyScreen());
+    else if (route === "/operations") refs.main.append(operationsScreen());
     refresh();
   }
   shell();

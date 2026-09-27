@@ -46,7 +46,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def serve_browser(self, path, accept):
         """Fixed allowlist keeps HTML/static delivery independent of API auth."""
-        routes = {"/", "/requests", "/split", "/signup", "/login", "/authorizations", "/statements", "/history"}
+        routes = {"/", "/requests", "/split", "/signup", "/login", "/authorizations", "/statements", "/history", "/operations"}
         assets = {"/static/app.js": ("app.js", "text/javascript; charset=utf-8"),
                   "/static/styles.css": ("styles.css", "text/css; charset=utf-8")}
         if path in routes and "text/html" in accept.lower():

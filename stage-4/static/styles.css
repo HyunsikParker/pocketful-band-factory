@@ -13,3 +13,6 @@
 .request-pay-form{display:flex;gap:8px;align-items:end;flex-wrap:wrap;min-width:0}.request-pay-form .field{max-width:210px}.feedback{margin-bottom:14px}
 .balance-long{font-size:30px;letter-spacing:-.6px}@media(max-width:720px){.balance-long{font-size:22px;letter-spacing:-.5px;white-space:nowrap}}
 @media(max-width:1080px){.home-workspace{display:flex;flex-direction:column}.home-workspace>.column{display:contents}.home-workspace .card{width:100%}.home-workspace .form-pay{order:1}.home-workspace .activity-card{order:2}.home-workspace .form-request{order:3}.home-workspace .form-authorize{order:4}}
+
+.batch-row{min-width:0;margin:0;padding:20px;border:1px solid var(--line);border-radius:12px}.batch-legend{font-size:14px;font-weight:650;padding:0 8px}.batch-results{padding-left:22px}.batch-results .record:first-child{padding-top:16px}[data-testid="batch-result"]:not(:empty){margin-top:28px;padding-top:24px;border-top:1px solid var(--line)}
+@media(max-width:720px){.batch-row{padding:16px}.batch-row .fields{grid-template-columns:1fr}}

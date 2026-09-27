@@ -1,10 +1,10 @@
-# Run Pocketful — Stage 3
+# Run Pocketful — Stage 4
 
 From this folder, build and start the single-container API:
 
 ```sh
-docker build -t pocketful-stage-3 .
-docker run --rm --name pocketful-stage-3 --cpus=2 --memory=2g -e PORT=8080 -p 8080:8080 pocketful-stage-3
+docker build -t pocketful-stage-4 .
+docker run --rm --name pocketful-stage-4 --cpus=2 --memory=2g -e PORT=8080 -p 8080:8080 pocketful-stage-4
 ```
 
 Readiness: `curl http://localhost:8080/health` returns `{"status":"ok"}`.
@@ -27,7 +27,7 @@ come from the fixture. Signup creates an account with zero balance.
 
 Log in through `/auth/login`, then send `Authorization: Bearer <token>`.
 `/payments`, `/requests`, `/requests/{id}/pay`, `/splits`, `/settlements`,
-`/authorizations`, `/authorizations/{id}/capture`, and `/payments/{id}/corrections`
+`/authorizations`, `/authorizations/{id}/capture`, `/payments/{id}/corrections`, `/payments/{id}/refunds`, and `/correction-batches`
 require `Idempotency-Key`. Monetary amounts are integer minor units. Settlement
 operator permissions come from the fixture.
 
@@ -39,8 +39,7 @@ state. Restarting the container discards state; no volume or setup step is neede
 
 The engine serializes state operations under one reentrant lock. Passwords use
 salted PBKDF2-HMAC-SHA256 digests. Sessions and successful retry receipts belong
-to exportable state rather than process-local caches. No deposits, external
-payment integrations, or later-stage endpoints are included.
+to exportable state rather than process-local caches. No deposits or external payment integrations are included.
 
 ## Browser flows and upgrades
 
@@ -56,7 +55,7 @@ A missing response is marked uncertain, not refused. Click the same action to
 recover its receipt without paying twice. Refresh uses only the latest requested
 read, and never clears the payment form. There is no background polling.
 
-Stage-1 and stage-2 exports can be imported without regenerating sessions or retry receipts.
+Stage-1, stage-2 and stage-3 exports can be imported without regenerating sessions or retry receipts.
 An already-open browser retains its form and pending attempt through an import
 between requests. The session is stored in the browser’s local storage; signing
 out removes it from this browser without invalidating other active sessions.
@@ -81,5 +80,20 @@ activity entry and earlier retry responses stay unchanged. A stale revision
 refusal keeps the draft editable: review the latest history, choose "Use latest
 revision", then submit. An uncertain response keeps the original body and key
 for a safe retry, including on ordinary HTTP origins. Captures and settlement
-members cannot be corrected individually. Refunds and correction batches are
-not included in this stage.
+members cannot be corrected individually. Refund payments are also immutable.
+
+## Refunds and operator corrections
+
+Recipients can open a receipt in `/history` to refund it. Current corrected amount,
+completed refunds and remaining refundable amount are displayed separately from
+the unchanged original receipt. Refunds use available funds and never reopen a
+request or authorization. Refresh eligibility without clearing the draft.
+
+`/operations` is an HTML batch editor for settlement operators; the JSON write
+endpoint remains `/correction-batches`. Enter 1–32 distinct payment IDs with their
+expected revisions, replacement amounts (including zero), effective times and
+reasons. All members of a settlement must be included with identical effective
+instants. The screen does not infer permissions or read private histories for
+operators. Refusals keep rows editable; lost responses retain the exact body and
+key for an unchanged retry. Successful receipts show revisions in input order
+and their shared recorded time. Existing statement snapshots remain frozen.
