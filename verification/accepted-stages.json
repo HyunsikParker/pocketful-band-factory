@@ -42,6 +42,22 @@
       "acceptance_report": "checks/verifier/stage3-acceptance-5cf06c1.md",
       "preserved_product_failure": "checks/verifier/s3-invalid-history-d19d695-01/report.json",
       "preserved_test_oracle_failure": "checks/verifier/s3-independent-d19d695-01/s3-api/tests.log"
+    },
+    "4": {
+      "production_revision": "42400632c8fef65555b936b987ecf1970df5f540",
+      "freeze_revision": "4a699f0122252283d10f4da598073098e6543994",
+      "tree": "9a7793978f59232f2bceca61b5da1e5e57a87b65",
+      "isolated_report": "checks/verifier/s4-isolated-4240063-01/report.json",
+      "official_checks": {"passed": 193, "collected": 193, "claimed_stage": 4},
+      "independent_groups": 148,
+      "complete_independent_final_revision_run": "checks/verifier/s4-independent-4240063-01/summary.json",
+      "portable_verifier_packaging_smoke": "checks/verifier/s4-packaging-4240063-01/summary.json",
+      "populated_cross_process_import": "Actual S1/S2/S3 sources destroyed before repeated import, preserving6/12/13 original responses, tokens, roles, pending requests, holds, settlements and two Stage3 snapshots; open-browser recovery passed",
+      "coverage": "All30 reviewer matrix rows closed; refunds, all10 keyed paths, complete atomic batches, precedence, available and historical solvency, CAS, UI and immutable snapshots independently verified",
+      "interpretations": ["Whole batch container shape and distinct IDs precede semantic item errors, whose order is input order", "Inherited Stage3 exact-time, legacy-browser and consistent-fixture interpretations retained"],
+      "acceptance_report": "checks/verifier/stage4-acceptance-4240063.md",
+      "observed_unresolved_product_defects": 0,
+      "final_chain_audit": "Separate fresh local clone required; this manifest does not assert organizer ranking or participant-owned submission gate completion"
     }
   }
 }
