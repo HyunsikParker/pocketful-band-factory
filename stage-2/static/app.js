@@ -25,6 +25,11 @@
   }
   const test = (id) => ({"data-testid": id});
   const text = (tag, value, attrs = {}) => el(tag, attrs, value);
+  function newRequestKey() {
+    // getRandomValues also works on standalone HTTP origins; randomUUID does not.
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    return Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
+  }
   function formatted(value, units = me?.minor_units ?? 2, currency = me?.currency ?? "EUR") {
     const amount = BigInt(value);
     const scale = 10n ** BigInt(units);
@@ -111,7 +116,7 @@
       catch (error) { feedback(config.feedback, config.errorId, "error", message(error)); return; }
       const signature = JSON.stringify(config.raw ? config.raw() : body);
       if (!state.attempt || state.attempt.version !== state.version || state.attempt.signature !== signature) {
-        state.attempt = {version: state.version, signature, body: JSON.stringify(body), key: crypto.randomUUID()};
+        state.attempt = {version: state.version, signature, body: JSON.stringify(body), key: newRequestKey()};
       }
       const attempt = state.attempt;
       const button = config.button;
