@@ -1,0 +1,80 @@
+{
+  "model": "gpt-6-astra",
+  "harness": "BAND-owned Codex app-server",
+  "dispatch_at": "2026-09-27T04:12:05.403Z",
+  "terminal_report_at": "2026-09-27T07:19:50.713Z",
+  "elapsed_seconds": 11265.31,
+  "usage_observed_at": "2026-09-27T07:20:43.787435+00:00",
+  "usage_scope": "Exact four runtime cumulative counters sampled after terminal report; includes final closeout, excludes operator work.",
+  "aggregate_usage": {
+    "input_tokens": 187569635,
+    "cached_input_tokens": 184042880,
+    "output_tokens": 636569,
+    "reasoning_output_tokens": 163728,
+    "total_tokens": 188206204
+  },
+  "seats": [
+    {
+      "seat": "coordinator",
+      "models": [
+        "gpt-6-astra"
+      ],
+      "last_token_event": "2026-09-27T07:20:43.151Z",
+      "total_token_usage": {
+        "input_tokens": 58261883,
+        "cached_input_tokens": 57309184,
+        "output_tokens": 212465,
+        "reasoning_output_tokens": 99378,
+        "total_tokens": 58474348
+      }
+    },
+    {
+      "seat": "core",
+      "models": [
+        "gpt-6-astra"
+      ],
+      "last_token_event": "2026-09-27T07:09:56.102Z",
+      "total_token_usage": {
+        "input_tokens": 28802678,
+        "cached_input_tokens": 28306432,
+        "output_tokens": 101558,
+        "reasoning_output_tokens": 13051,
+        "total_tokens": 28904236
+      }
+    },
+    {
+      "seat": "interface",
+      "models": [
+        "gpt-6-astra"
+      ],
+      "last_token_event": "2026-09-27T07:09:56.900Z",
+      "total_token_usage": {
+        "input_tokens": 35687115,
+        "cached_input_tokens": 34979968,
+        "output_tokens": 123889,
+        "reasoning_output_tokens": 20248,
+        "total_tokens": 35811004
+      }
+    },
+    {
+      "seat": "verifier",
+      "models": [
+        "gpt-6-astra"
+      ],
+      "last_token_event": "2026-09-27T07:18:59.505Z",
+      "total_token_usage": {
+        "input_tokens": 64817959,
+        "cached_input_tokens": 63447296,
+        "output_tokens": 198657,
+        "reasoning_output_tokens": 31051,
+        "total_tokens": 65016616
+      }
+    }
+  ],
+  "cached_input_included_in_input": true,
+  "reasoning_output_included_in_output": true,
+  "all_counters_monotonic": true,
+  "usd_spend": null,
+  "billing_basis": "Configured Codex subscription; no per-run invoice or verified USD charge available.",
+  "elapsed_time_basis": "Both timestamps from the unchanged full room export; native dispatch-receipt and coordinator-local timestamps differ by fractions of a second."
+}
