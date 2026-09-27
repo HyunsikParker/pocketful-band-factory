@@ -27,6 +27,21 @@
       "acceptance_report": "checks/verifier/stage2-acceptance-dc2b5f7.md",
       "preserved_product_failure": "checks/verifier/s2-independent-473b515-02/http-origin/report.json",
       "preserved_operational_failure": "checks/verifier/s2-independent-473b515-01"
+    },
+    "3": {
+      "production_revision": "5cf06c136945e935a1c90c9bd23bbb946055480b",
+      "freeze_revision": "9555d1388d849bfef2ef796bf88bc0b195880119",
+      "tree": "77306c65e74ce44cc3eabbfabaed4d4c4ae70693",
+      "isolated_report": "checks/verifier/s3-isolated-5cf06c1-01/report.json",
+      "official_checks": {"passed": 188, "collected": 188, "claimed_stage": 3},
+      "independent_groups": 102,
+      "complete_independent_final_revision_run": "checks/verifier/s3-packaged-independent-5cf06c1-01/summary.json",
+      "populated_cross_process_import": "S1 and S2 source destroyed before import; original responses/tokens/roles/holds preserved; open-browser recovery passed",
+      "coverage": "All 28 reviewer matrix rows closed; malformed historical total/available state import fixed and independently rejected atomically",
+      "interpretations": ["Same-instant legality uses combined effects; statement entries retain ordered running balances", "Offline structural RFC3339 leap handling, not leap-announcement verification", "Future-created already-open seed holds are inconsistent/unspecified fixtures, not delayed reservations"],
+      "acceptance_report": "checks/verifier/stage3-acceptance-5cf06c1.md",
+      "preserved_product_failure": "checks/verifier/s3-invalid-history-d19d695-01/report.json",
+      "preserved_test_oracle_failure": "checks/verifier/s3-independent-d19d695-01/s3-api/tests.log"
     }
   }
 }
