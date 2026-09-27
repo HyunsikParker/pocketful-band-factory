@@ -1,4 +1,4 @@
-"""Pocketful stage-two domain engine.
+"""Pocketful stage-three domain engine.
 
 One lock is the transaction boundary for every read and write, including control
 operations and authentication. Receipts and idempotent responses are independent
@@ -13,6 +13,7 @@ import math
 import re
 from threading import RLock
 from uuid import uuid4
+from calendar import monthrange
 
 
 class ApiError(Exception):
@@ -109,13 +110,53 @@ def fingerprint(body):
     return json.dumps(canonical(body), ensure_ascii=True, separators=(",", ":"))
 
 
+def time_key(value):
+    """Exact RFC3339 ordering, retaining sub-microsecond input precision.
+
+    UTC seconds are calculated arithmetically, not with local time or floating
+    timestamps. Fractional seconds compare as Decimal values without rounding.
+    """
+    if not isinstance(value, str):
+        fail()
+    match = re.fullmatch(r"([0-9]{4})-([0-9]{2})-([0-9]{2})[Tt]([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]+))?([Zz]|[+-][0-9]{2}:[0-9]{2})", value)
+    if match is None:
+        fail()
+    year, month, day, hour, minute, second = map(int, match.groups()[:6])
+    try:
+        date = datetime(year, month, day, hour, minute, min(second, 59))
+    except ValueError:
+        fail()
+    zone = match[8]
+    offset = 0
+    if zone.upper() != "Z":
+        zh, zm = int(zone[1:3]), int(zone[4:6])
+        if zh > 23 or zm > 59:
+            fail()
+        offset = (zh * 60 + zm) * 60 * (1 if zone[0] == "+" else -1)
+    if second > 60:
+        fail()
+    seconds = date.toordinal() * 86400 + hour * 3600 + minute * 60 + min(second, 59) - offset
+    if second == 60:
+        # RFC3339's insertion position is the final UTC minute of a month.
+        # Keep that extra second distinct: :59.f < :60.f < next minute :00.
+        try:
+            utc_date = datetime.fromordinal(seconds // 86400)
+        except ValueError:
+            fail()
+        if seconds % 86400 != 86399 or utc_date.day != monthrange(utc_date.year, utc_date.month)[1]:
+            fail()
+        return seconds, Decimal("1." + (match[7] or "0"))
+    return seconds, Decimal("0." + (match[7] or "0"))
+
+
 def blank_state():
-    return {"schema": 2, "currency": "EUR", "minor_units": 2,
+    return {"schema": 3, "currency": "EUR", "minor_units": 2,
             "users": {}, "tokens": {}, "payments": {}, "requests": {},
             "splits": {}, "settlements": {}, "idempotency": {},
             "settlement_operator_ids": [], "seeded_total": 0,
             "authorization_ttl_seconds": 600, "authorizations": {},
-            "authorization_lifecycle": {}}
+            "authorization_lifecycle": {}, "opening_balances": {},
+            "revisions": {}, "snapshots": {}}
 
 
 class Engine:
@@ -144,17 +185,21 @@ class Engine:
                 return 204, None
             import auth
             if method == "POST" and path in ("/auth/signup", "/auth/login"):
-                return auth.handle_auth(self.state, path, body)
+                result = auth.handle_auth(self.state, path, body)
+                self.state["opening_balances"].setdefault(result[1]["user_id"], 0)
+                return result
             user_id = auth.authenticate(self.state, headers.get("authorization"))
             if method == "POST" and path == "/settlements":
                 if user_id not in self.state["settlement_operator_ids"]:
                     fail("forbidden", 403)
             request_action = re.fullmatch(r"/requests/([^/]+)/(pay|decline|cancel)", path)
             authorization_action = re.fullmatch(r"/authorizations/([^/]+)/(capture|void)", path)
+            payment_action = re.fullmatch(r"/payments/([^/]+)/(corrections|revisions)", path)
             idempotent = method == "POST" and (
                 path in ("/payments", "/requests", "/splits", "/settlements", "/authorizations")
                 or (request_action and request_action[2] == "pay")
-                or (authorization_action and authorization_action[2] == "capture"))
+                or (authorization_action and authorization_action[2] == "capture")
+                or (payment_action and payment_action[2] == "corrections"))
             claim = None
             if idempotent:
                 key = headers.get("idempotency-key")
@@ -170,12 +215,16 @@ class Engine:
                         fail("idempotency_key_reuse", 409)
                     return 200, deepcopy(previous["response"])
             if method == "GET" and path == "/me":
-                user = self.state["users"][user_id]
-                response = {"user_id": user_id, "display_name": user["display_name"],
-                            "handle": user["handle"], "balance": user["balance"],
-                            "total": user["balance"], "held": self._held(user_id),
-                            "available": user["balance"] - self._held(user_id),
-                            "currency": self.state["currency"], "minor_units": self.state["minor_units"]}
+                response = self._me(user_id, query)
+            elif method == "GET" and path == "/statement":
+                response = self._statement(user_id, query)
+            elif method == "GET" and payment_action and payment_action[2] == "revisions":
+                payment = self.state["payments"].get(payment_action[1])
+                if payment is None or user_id not in (payment["from_user_id"], payment["to_user_id"]):
+                    fail("not_found", 404)
+                response = {"revisions": self.state["revisions"][payment_action[1]]}
+            elif method == "POST" and payment_action and payment_action[2] == "corrections":
+                response = self._correct(user_id, payment_action[1], body)
             elif method == "GET" and path == "/activity":
                 items = [dict(p, authorization_id=p.get("authorization_id")) for p in self.state["payments"].values()
                          if p["visibility"] == "public" or user_id in (p["from_user_id"], p["to_user_id"])]
@@ -242,7 +291,7 @@ class Engine:
         values = query.get(key)
         return values[0] if values else default
 
-    def _page(self, items, query, field):
+    def _pagination(self, query):
         values = []
         for name, default, minimum, maximum in (("limit", "50", 1, 200), ("offset", "0", 0, None)):
             raw = self._query(query, name, default)
@@ -255,8 +304,11 @@ class Engine:
             if number < minimum or (maximum is not None and number > maximum):
                 fail()
             values.append(number)
-        limit, offset = values
-        ordered = sorted(items, key=lambda item: datetime.fromisoformat(item["created_at"]), reverse=True)
+        return values
+
+    def _page(self, items, query, field):
+        limit, offset = self._pagination(query)
+        ordered = sorted(items, key=lambda item: time_key(item["created_at"]), reverse=True)
         return {field: ordered[offset:offset + limit], "has_more": offset + limit < len(ordered)}
 
     def _user_by_handle(self, handle):
@@ -284,10 +336,16 @@ class Engine:
 
     def _authorization_view(self, authorization):
         result = deepcopy(authorization)
-        if result["status"] == "open" and datetime.fromisoformat(result["expires_at"]) <= datetime.fromisoformat(self._now):
+        if result["status"] == "open" and time_key(result["expires_at"]) <= time_key(self._now):
             result["status"] = "expired"
         result["remaining_amount"] = (result["amount"] - result["captured_amount"]
                                       if result["status"] == "open" else 0)
+        result["closed_at"] = None
+        if result["status"] == "expired":
+            result["closed_at"] = result["expires_at"]
+        elif result["status"] != "open":
+            events = self.state["authorization_lifecycle"].get(result["authorization_id"], [])
+            result["closed_at"] = events[-1]["at"] if events else result["created_at"]
         return result
 
     def _held(self, user_id):
@@ -321,7 +379,7 @@ class Engine:
         self.state["authorizations"][aid] = authorization
         self.state["authorization_lifecycle"][aid] = [
             {"kind": "created", "at": self._now, "remaining_amount": amount}]
-        return authorization
+        return self._authorization_view(authorization)
 
     def _authorization_action(self, user_id, aid, action, body):
         authorization = self.state["authorizations"].get(aid)
@@ -379,6 +437,7 @@ class Engine:
             self.state["users"][uid]["balance"] += delta
         for payment in payments:
             self.state["payments"][payment["payment_id"]] = payment
+            self.state["revisions"][payment["payment_id"]] = [self._original_revision(payment)]
 
     def _request(self, requester, payer, amount, memo, at=None, rid=None, status="pending", payment_id=None):
         users = self.state["users"]
@@ -463,15 +522,218 @@ class Engine:
         return response
 
     @staticmethod
-    def _timestamp(value):
-        if not isinstance(value, str):
-            fail()
-        try:
-            parsed = datetime.fromisoformat(value)
-            if parsed.tzinfo is None:
+    def _original_revision(payment):
+        return {"payment_id": payment["payment_id"], "revision": 1,
+                "amount": payment["amount"], "effective_at": payment["created_at"],
+                "recorded_at": payment["created_at"], "reason": ""}
+
+    @staticmethod
+    def _initialize_ledger(state):
+        openings = {uid: user["balance"] for uid, user in state["users"].items()}
+        revisions = {}
+        for pid, payment in state["payments"].items():
+            openings[payment["from_user_id"]] += payment["amount"]
+            openings[payment["to_user_id"]] -= payment["amount"]
+            revisions[pid] = [Engine._original_revision(payment)]
+        state.update(schema=3, opening_balances=openings, revisions=revisions, snapshots={})
+
+    def _selected(self, known=None, overrides=None):
+        selected = {}
+        for pid, revisions in self.state["revisions"].items():
+            if overrides and pid in overrides:
+                selected[pid] = overrides[pid]
+            elif known is None:
+                selected[pid] = revisions[-1]
+            else:
+                revision = next((r for r in reversed(revisions) if time_key(r["recorded_at"]) <= known), None)
+                if revision is not None:
+                    selected[pid] = revision
+        return selected
+
+    def _hold_at(self, aid, as_of, known=None):
+        authorization = self.state["authorizations"][aid]
+        events = self.state["authorization_lifecycle"][aid]
+        creation = time_key(authorization["created_at"])
+        if creation > as_of or (known is not None and creation > known):
+            return 0
+        # Once creation is known, the expiry deadline is already known, even in
+        # a future as_of view with an earlier known_at cutoff.
+        if time_key(authorization["expires_at"]) <= as_of:
+            return 0
+        remaining = 0
+        for event in events:
+            event_time = time_key(event["at"])
+            if event_time <= as_of and (known is None or event_time <= known):
+                remaining = event["remaining_amount"]
+        return remaining
+
+    def _me(self, user_id, query):
+        supplied_as_of = self._query(query, "as_of")
+        supplied_known = self._query(query, "known_at")
+        as_of = time_key(self._now if supplied_as_of is None else supplied_as_of)
+        known = time_key(supplied_known) if supplied_known is not None else None
+        total = self.state["opening_balances"][user_id]
+        for pid, revision in self._selected(known).items():
+            payment = self.state["payments"][pid]
+            if time_key(revision["effective_at"]) <= as_of:
+                if payment["from_user_id"] == user_id:
+                    total -= revision["amount"]
+                elif payment["to_user_id"] == user_id:
+                    total += revision["amount"]
+        held = sum(self._hold_at(aid, as_of, known) for aid, authorization in self.state["authorizations"].items()
+                   if authorization["from_user_id"] == user_id)
+        user = self.state["users"][user_id]
+        result = {"user_id": user_id, "display_name": user["display_name"], "handle": user["handle"],
+                  "balance": total, "total": total, "held": held, "available": total - held,
+                  "currency": self.state["currency"], "minor_units": self.state["minor_units"]}
+        if supplied_as_of is not None:
+            result["as_of"] = supplied_as_of
+        if supplied_known is not None:
+            result["known_at"] = supplied_known
+        return result
+
+    def _statement(self, user_id, query):
+        limit, offset = self._pagination(query)
+        token = self._query(query, "snapshot")
+        if token is not None:
+            if any(name in query for name in ("from", "to", "known_at")):
                 fail()
-        except (ValueError, OverflowError):
+            frozen = self.state["snapshots"].get(token)
+            if frozen is None or frozen["user_id"] != user_id:
+                fail("not_found", 404)
+        else:
+            supplied_from, supplied_to = self._query(query, "from"), self._query(query, "to")
+            supplied_known = self._query(query, "known_at")
+            start = time_key(supplied_from) if supplied_from is not None else None
+            end = time_key(self._now if supplied_to is None else supplied_to)
+            known = time_key(supplied_known) if supplied_known is not None else None
+            if start is not None and start > end:
+                fail()
+            selected = [(pid, revision) for pid, revision in self._selected(known).items()
+                        if user_id in (self.state["payments"][pid]["from_user_id"], self.state["payments"][pid]["to_user_id"])]
+            selected.sort(key=lambda pair: (time_key(pair[1]["effective_at"]), pair[0]))
+            running = self.state["opening_balances"][user_id]
+            opening = running
+            entries = []
+            for pid, revision in selected:
+                effective = time_key(revision["effective_at"])
+                if effective >= end:
+                    break
+                payment = self.state["payments"][pid]
+                delta = revision["amount"] * (-1 if payment["from_user_id"] == user_id else 1)
+                running += delta
+                if start is not None and effective < start:
+                    opening = running
+                    continue
+                statement_payment = dict(payment, amount=revision["amount"], authorization_id=payment.get("authorization_id"))
+                entries.append({"payment": statement_payment, "delta": delta, "balance_after": running,
+                                "revision": revision["revision"], "effective_at": revision["effective_at"],
+                                "recorded_at": revision["recorded_at"]})
+            token = new_id("ss_")
+            data = {"opening_balance": opening, "closing_balance": running, "entries": entries}
+            if supplied_known is not None:
+                data["known_at"] = supplied_known
+            frozen = {"user_id": user_id, "data": data,
+                      "window": {"from": supplied_from, "to": supplied_to or self._now,
+                                 "known_at": supplied_known}}
+            self.state["snapshots"][token] = frozen
+        data = deepcopy(frozen["data"])
+        entries = data["entries"]
+        data.update(snapshot=token, entries=entries[offset:offset + limit], has_more=offset + limit < len(entries))
+        return data
+
+    def _correction_fields(self, body):
+        expected = integer(body.get("expected_revision"), 1)
+        amount = integer(body.get("amount"), 0, 10**9)
+        effective = body.get("effective_at")
+        if time_key(effective) > time_key(self._now):
             fail()
+        reason = body.get("reason")
+        if not isinstance(reason, str) or not 1 <= len(reason) <= 200:
+            fail()
+        return expected, amount, effective, reason
+
+    def _correct(self, user_id, pid, body):
+        payment = self.state["payments"].get(pid)
+        if payment is None:
+            fail("not_found", 404)
+        if payment["from_user_id"] != user_id:
+            fail("forbidden", 403)
+        if payment.get("settlement_id") is not None or payment.get("authorization_id") is not None:
+            fail("linked_payment_immutable")
+        expected, amount, effective, reason = self._correction_fields(body)
+        previous = self.state["revisions"][pid][-1]
+        if expected != previous["revision"]:
+            fail("stale_revision", 409)
+        change = amount - previous["amount"]
+        deltas = {payment["from_user_id"]: -change, payment["to_user_id"]: change}
+        self._afford(deltas)
+        recorded = self._now
+        if time_key(recorded) <= time_key(previous["recorded_at"]):
+            try:
+                seconds, fraction = time_key(previous["recorded_at"])
+                # Round strictly upward to our server's microsecond precision;
+                # client fractions, offsets, lowercase forms and leap notation
+                # never pass through datetime.fromisoformat truncation.
+                whole, fractional = format(fraction, "f").split(".")
+                micros = int(whole) * 10**6 + int((fractional + "000000")[:6]) + 1
+                recorded = (datetime.fromordinal(seconds // 86400).replace(tzinfo=timezone.utc)
+                            + timedelta(seconds=seconds % 86400, microseconds=micros)).isoformat(timespec="microseconds")
+            except (ValueError, OverflowError):
+                fail()
+        revision = {"payment_id": pid, "revision": expected + 1, "amount": amount,
+                    "effective_at": effective, "recorded_at": recorded, "reason": reason}
+        self._assert_history({pid: revision})
+        for uid, delta in deltas.items():
+            self.state["users"][uid]["balance"] += delta
+        self.state["revisions"][pid].append(revision)
+        return revision
+
+    def _assert_history(self, overrides):
+        """Aggregate simultaneous money/hold events before testing a boundary."""
+        boundaries = {}
+        now = time_key(self._now)
+
+        def event(at, uid, money=0, hold=0):
+            if at > now:
+                return
+            changes = boundaries.setdefault(at, {})
+            prior = changes.setdefault(uid, [0, 0])
+            prior[0] += money
+            prior[1] += hold
+
+        for pid, revision in self._selected(overrides=overrides).items():
+            payment = self.state["payments"][pid]
+            at = time_key(revision["effective_at"])
+            event(at, payment["from_user_id"], money=-revision["amount"])
+            event(at, payment["to_user_id"], money=revision["amount"])
+        for aid, authorization in self.state["authorizations"].items():
+            uid = authorization["from_user_id"]
+            expiry = time_key(authorization["expires_at"])
+            remaining = 0
+            for lifecycle in self.state["authorization_lifecycle"][aid]:
+                at = time_key(lifecycle["at"])
+                if at >= expiry:
+                    break
+                value = lifecycle["remaining_amount"]
+                event(at, uid, hold=value - remaining)
+                remaining = value
+            if remaining:
+                event(expiry, uid, hold=-remaining)
+        balances = self.state["opening_balances"].copy()
+        held = {uid: 0 for uid in balances}
+        if any(balance < 0 for balance in balances.values()):
+            fail("historical_overdraft", 409)
+        for at in sorted(boundaries):
+            for uid, (money, hold) in boundaries[at].items():
+                balances[uid] += money
+                held[uid] += hold
+                if balances[uid] < 0 or balances[uid] - held[uid] < 0:
+                    fail("historical_overdraft", 409)
+
+    @staticmethod
+    def _timestamp(value):
+        time_key(value)
         return value
 
     def _fixture(self, body):
@@ -529,6 +791,8 @@ class Engine:
                 memo = note(item)
                 created = self._timestamp(item.get("created_at", at))
                 if field == "payments":
+                    if time_key(created) > time_key(at):
+                        fail()
                     sender, receiver = item.get("from_user_id"), item.get("to_user_id")
                     if not isinstance(sender, str) or not isinstance(receiver, str) or sender not in state["users"] or receiver not in state["users"] or sender == receiver:
                         fail()
@@ -590,6 +854,7 @@ class Engine:
                  "remaining_amount": authorization["remaining_amount"]}]
         if any(user["balance"] - replacement._held(uid) < 0 for uid, user in state["users"].items()):
             fail()
+        self._initialize_ledger(state)
         return state
 
     def _import(self, body):
@@ -603,8 +868,9 @@ class Engine:
         return state
 
     def _validate_state(self, state):
-        if not isinstance(state, dict) or isinstance(state.get("schema"), bool) or state.get("schema") not in (1, 2):
+        if not isinstance(state, dict) or isinstance(state.get("schema"), bool) or state.get("schema") not in (1, 2, 3):
             fail()
+        source_schema = state["schema"]
         legacy = state["schema"] == 1
         for field in ("users", "tokens", "payments", "requests", "splits", "settlements", "idempotency"):
             if not isinstance(state.get(field), dict):
@@ -735,6 +1001,82 @@ class Engine:
                          authorizations={}, authorization_lifecycle={})
         else:
             self._validate_authorizations(state)
+        if source_schema < 3:
+            self._initialize_ledger(state)
+        else:
+            self._validate_ledger(state)
+
+    def _validate_ledger(self, state):
+        openings, revisions, snapshots = state.get("opening_balances"), state.get("revisions"), state.get("snapshots")
+        if not isinstance(openings, dict) or set(openings) != set(state["users"]):
+            fail()
+        if not isinstance(revisions, dict) or set(revisions) != set(state["payments"]) or not isinstance(snapshots, dict):
+            fail()
+        balances = {uid: integer(value, -(2**53)) for uid, value in openings.items()}
+        for pid, history in revisions.items():
+            payment = state["payments"][pid]
+            if not isinstance(history, list) or not history or history[0] != self._original_revision(payment):
+                fail()
+            previous = None
+            for number, revision in enumerate(history, 1):
+                if not isinstance(revision, dict) or revision.get("payment_id") != pid or integer(revision.get("revision"), 1) != number:
+                    fail()
+                integer(revision.get("amount"), 0, 10**9)
+                time_key(revision.get("effective_at"))
+                recorded = time_key(revision.get("recorded_at"))
+                if previous is not None and recorded <= previous:
+                    fail()
+                previous = recorded
+                reason = revision.get("reason")
+                if not isinstance(reason, str) or len(reason) > 200 or (number > 1 and not reason):
+                    fail()
+            balances[payment["from_user_id"]] -= history[-1]["amount"]
+            balances[payment["to_user_id"]] += history[-1]["amount"]
+        if any(value != state["users"][uid]["balance"] for uid, value in balances.items()):
+            fail()
+        if sum(openings.values()) != state["seeded_total"]:
+            fail()
+        for token, frozen in snapshots.items():
+            if not isinstance(token, str) or not 1 <= len(token) <= 64 or not isinstance(frozen, dict):
+                fail()
+            uid, data, window = frozen.get("user_id"), frozen.get("data"), frozen.get("window")
+            if uid not in state["users"] or not isinstance(data, dict) or not isinstance(window, dict):
+                fail()
+            for name in ("from", "to", "known_at"):
+                if name not in window:
+                    fail()
+                if window[name] is not None:
+                    time_key(window[name])
+            opening = integer(data.get("opening_balance"), -(2**53))
+            closing = integer(data.get("closing_balance"), -(2**53))
+            entries = data.get("entries")
+            if not isinstance(entries, list):
+                fail()
+            running, prior = opening, None
+            for entry in entries:
+                if not isinstance(entry, dict) or not isinstance(entry.get("payment"), dict):
+                    fail()
+                payment = entry["payment"]
+                pid = payment.get("payment_id")
+                if pid not in state["payments"] or uid not in (payment.get("from_user_id"), payment.get("to_user_id")):
+                    fail()
+                number = integer(entry.get("revision"), 1, len(revisions[pid]))
+                revision = revisions[pid][number - 1]
+                if (entry.get("effective_at") != revision["effective_at"] or entry.get("recorded_at") != revision["recorded_at"]
+                        or payment.get("amount") != revision["amount"]):
+                    fail()
+                order = time_key(entry["effective_at"]), pid
+                if prior is not None and order <= prior:
+                    fail()
+                prior = order
+                delta = integer(entry.get("delta"), -(10**9), 10**9)
+                if delta != revision["amount"] * (-1 if payment["from_user_id"] == uid else 1):
+                    fail()
+                running += delta
+                if entry.get("balance_after") != running:
+                    fail()
+            if running != closing:
+                fail()
 
     def _validate_authorizations(self, state):
         state["authorization_ttl_seconds"] = integer(state.get("authorization_ttl_seconds"), 1)
@@ -787,7 +1129,7 @@ class Engine:
             for event in events:
                 if not isinstance(event, dict) or event.get("kind") not in ("created", "seeded_closed", "partial_capture", "captured", "voided"):
                     fail()
-                when = datetime.fromisoformat(self._timestamp(event.get("at")))
+                when = time_key(event.get("at"))
                 if previous_at is not None and when < previous_at:
                     fail()
                 previous_at = when
