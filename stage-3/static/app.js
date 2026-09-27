@@ -329,17 +329,19 @@
     refs.authorizations.append(list);
   }
 
-  function instant(raw, label, optional = true, pastOnly = false) {
+  function instant(raw, label, optional = true) {
     const value = raw.trim();
     if (!value && optional) return null;
     const parts = /^(\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?([Zz]|[+-]\d{2}:\d{2})$/.exec(value);
     if (!parts) throw new Error(`${label}: use a complete timestamp with Z or an offset, for example 2026-09-24T13:20:00+00:00.`);
     const [, year, month, day, hour, minute, second, zone] = parts;
-    const days = new Date(Date.UTC(Number(year), Number(month), 0)).getUTCDate();
-    if (+month < 1 || +month > 12 || +day < 1 || +day > days || +hour > 23 || +minute > 59 || +second > 59 ||
-        (zone.length > 1 && (+zone.slice(1, 3) > 23 || +zone.slice(4) > 59)) || !Number.isFinite(Date.parse(value)))
+    const leapYear = +year % 4 === 0 && (+year % 100 !== 0 || +year % 400 === 0);
+    const days = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][+month - 1];
+    if (+month < 1 || +month > 12 || +day < 1 || +day > days || +hour > 23 || +minute > 59 || +second > 60 ||
+        (zone.length > 1 && (+zone.slice(1, 3) > 23 || +zone.slice(4) > 59)))
       throw new Error(`${label}: enter a valid calendar date, time and offset.`);
-    if (pastOnly && Date.parse(value) > Date.now()) throw new Error(`${label} cannot be in the future.`);
+    // The server is authoritative for leap-second placement and future limits.
+    // Do not round fractions or normalize offsets through JavaScript Date.
     return value;
   }
   function timeField(id, label, optional = true) {
@@ -478,7 +480,7 @@
             el("div", {class: "fields"}, amount.wrap, expected.wrap, effective.wrap, reason.wrap), el("div", {class: "record-actions"}, button, reload, adopt), feedbackBox);
           wireWrite(form, {name: `correction-${id}`, button, feedback: feedbackBox, errorId: "correction-error", uncertainId: "correction-uncertain", path: () => `/payments/${encodeURIComponent(id)}/corrections`,
             body: () => { const length = Array.from(reason.input.value).length; if (!length || length > 200) throw new Error("Add a reason of 1–200 characters.");
-              return {expected_revision: Number(expected.input.value), amount: minor(amount.input.value, true), effective_at: instant(effective.input.value, "Effective at", false, true), reason: reason.input.value}; },
+              return {expected_revision: Number(expected.input.value), amount: minor(amount.input.value, true), effective_at: instant(effective.input.value, "Effective at", false), reason: reason.input.value}; },
             raw: () => [expected.input.value, amount.input.value, effective.input.value, reason.input.value], success: "Correction saved. Original receipts and existing statement snapshots remain unchanged.",
             afterOutcome: async () => { try { const updated = await api(`/payments/${encodeURIComponent(id)}/revisions`); if (current !== selection) return; draw(updated.revisions); latestRevision = updated.revisions.at(-1).revision; } catch {} }});
           detail.append(form);
