@@ -1,4 +1,4 @@
-"""Pocketful stage-three domain engine.
+"""Pocketful stage-four domain engine.
 
 One lock is the transaction boundary for every read and write, including control
 operations and authentication. Receipts and idempotent responses are independent
@@ -150,13 +150,13 @@ def time_key(value):
 
 
 def blank_state():
-    return {"schema": 3, "currency": "EUR", "minor_units": 2,
+    return {"schema": 4, "currency": "EUR", "minor_units": 2,
             "users": {}, "tokens": {}, "payments": {}, "requests": {},
             "splits": {}, "settlements": {}, "idempotency": {},
             "settlement_operator_ids": [], "seeded_total": 0,
             "authorization_ttl_seconds": 600, "authorizations": {},
             "authorization_lifecycle": {}, "opening_balances": {},
-            "revisions": {}, "snapshots": {}}
+            "revisions": {}, "snapshots": {}, "correction_batches": {}}
 
 
 class Engine:
@@ -189,17 +189,17 @@ class Engine:
                 self.state["opening_balances"].setdefault(result[1]["user_id"], 0)
                 return result
             user_id = auth.authenticate(self.state, headers.get("authorization"))
-            if method == "POST" and path == "/settlements":
+            if method == "POST" and path in ("/settlements", "/correction-batches"):
                 if user_id not in self.state["settlement_operator_ids"]:
                     fail("forbidden", 403)
             request_action = re.fullmatch(r"/requests/([^/]+)/(pay|decline|cancel)", path)
             authorization_action = re.fullmatch(r"/authorizations/([^/]+)/(capture|void)", path)
-            payment_action = re.fullmatch(r"/payments/([^/]+)/(corrections|revisions)", path)
+            payment_action = re.fullmatch(r"/payments/([^/]+)/(corrections|revisions|refunds)", path)
             idempotent = method == "POST" and (
-                path in ("/payments", "/requests", "/splits", "/settlements", "/authorizations")
+                path in ("/payments", "/requests", "/splits", "/settlements", "/authorizations", "/correction-batches")
                 or (request_action and request_action[2] == "pay")
                 or (authorization_action and authorization_action[2] == "capture")
-                or (payment_action and payment_action[2] == "corrections"))
+                or (payment_action and payment_action[2] in ("corrections", "refunds")))
             claim = None
             if idempotent:
                 key = headers.get("idempotency-key")
@@ -225,8 +225,12 @@ class Engine:
                 response = {"revisions": self.state["revisions"][payment_action[1]]}
             elif method == "POST" and payment_action and payment_action[2] == "corrections":
                 response = self._correct(user_id, payment_action[1], body)
+            elif method == "POST" and payment_action and payment_action[2] == "refunds":
+                response = self._refund(user_id, payment_action[1], body)
+            elif method == "POST" and path == "/correction-batches":
+                response = self._correction_batch(body)
             elif method == "GET" and path == "/activity":
-                items = [dict(p, authorization_id=p.get("authorization_id")) for p in self.state["payments"].values()
+                items = [dict(p, authorization_id=p.get("authorization_id"), refund_of=p.get("refund_of")) for p in self.state["payments"].values()
                          if p["visibility"] == "public" or user_id in (p["from_user_id"], p["to_user_id"])]
                 response = self._page(items, query, "payments")
             elif method == "GET" and path == "/requests":
@@ -325,14 +329,14 @@ class Engine:
             if balance > 2**53:
                 fail()
 
-    def _payment(self, sender, receiver, amount, memo, public, request_id=None, settlement_id=None, at=None, pid=None, authorization_id=None):
+    def _payment(self, sender, receiver, amount, memo, public, request_id=None, settlement_id=None, at=None, pid=None, authorization_id=None, refund_of=None):
         users = self.state["users"]
         return {"payment_id": pid or new_id("p_"), "from_user_id": sender,
                 "from_handle": users[sender]["handle"], "to_user_id": receiver,
                 "to_handle": users[receiver]["handle"], "amount": amount,
                 "currency": self.state["currency"], "note": memo, "visibility": public,
                 "request_id": request_id, "settlement_id": settlement_id,
-                "authorization_id": authorization_id, "created_at": at or self._now}
+                "authorization_id": authorization_id, "refund_of": refund_of, "created_at": at or self._now}
 
     def _authorization_view(self, authorization):
         result = deepcopy(authorization)
@@ -535,7 +539,7 @@ class Engine:
             openings[payment["from_user_id"]] += payment["amount"]
             openings[payment["to_user_id"]] -= payment["amount"]
             revisions[pid] = [Engine._original_revision(payment)]
-        state.update(schema=3, opening_balances=openings, revisions=revisions, snapshots={})
+        state.update(schema=4, opening_balances=openings, revisions=revisions, snapshots={}, correction_batches={})
 
     def _selected(self, known=None, overrides=None):
         selected = {}
@@ -625,7 +629,7 @@ class Engine:
                 if start is not None and effective < start:
                     opening = running
                     continue
-                statement_payment = dict(payment, amount=revision["amount"], authorization_id=payment.get("authorization_id"))
+                statement_payment = dict(payment, amount=revision["amount"], authorization_id=payment.get("authorization_id"), refund_of=payment.get("refund_of"))
                 entries.append({"payment": statement_payment, "delta": delta, "balance_after": running,
                                 "revision": revision["revision"], "effective_at": revision["effective_at"],
                                 "recorded_at": revision["recorded_at"]})
@@ -659,19 +663,33 @@ class Engine:
             fail("not_found", 404)
         if payment["from_user_id"] != user_id:
             fail("forbidden", 403)
-        if payment.get("settlement_id") is not None or payment.get("authorization_id") is not None:
+        if any(payment.get(link) is not None for link in ("settlement_id", "authorization_id", "refund_of")):
             fail("linked_payment_immutable")
         expected, amount, effective, reason = self._correction_fields(body)
         previous = self.state["revisions"][pid][-1]
         if expected != previous["revision"]:
             fail("stale_revision", 409)
+        if amount < self._refunded(pid):
+            fail("refund_exceeds_payment")
         change = amount - previous["amount"]
         deltas = {payment["from_user_id"]: -change, payment["to_user_id"]: change}
         self._afford(deltas)
+        recorded = self._recorded_after([previous])
+        revision = {"payment_id": pid, "revision": expected + 1, "amount": amount,
+                    "effective_at": effective, "recorded_at": recorded, "reason": reason}
+        self._assert_history({pid: revision})
+        for uid, delta in deltas.items():
+            self.state["users"][uid]["balance"] += delta
+        self.state["revisions"][pid].append(revision)
+        return revision
+
+    def _recorded_after(self, previous):
+        """One timestamp strictly later than every replaced revision."""
+        latest = max(time_key(revision["recorded_at"]) for revision in previous)
         recorded = self._now
-        if time_key(recorded) <= time_key(previous["recorded_at"]):
+        if time_key(recorded) <= latest:
             try:
-                seconds, fraction = time_key(previous["recorded_at"])
+                seconds, fraction = latest
                 # Round strictly upward to our server's microsecond precision;
                 # client fractions, offsets, lowercase forms and leap notation
                 # never pass through datetime.fromisoformat truncation.
@@ -681,13 +699,84 @@ class Engine:
                             + timedelta(seconds=seconds % 86400, microseconds=micros)).isoformat(timespec="microseconds")
             except (ValueError, OverflowError):
                 fail()
-        revision = {"payment_id": pid, "revision": expected + 1, "amount": amount,
-                    "effective_at": effective, "recorded_at": recorded, "reason": reason}
-        self._assert_history({pid: revision})
+        return recorded
+
+    def _refunded(self, pid):
+        return sum(payment["amount"] for payment in self.state["payments"].values()
+                   if payment.get("refund_of") == pid)
+
+    def _refund(self, user_id, pid, body):
+        payment = self.state["payments"].get(pid)
+        if payment is None:
+            fail("not_found", 404)
+        if payment["to_user_id"] != user_id:
+            fail("forbidden", 403)
+        if payment.get("refund_of") is not None:
+            fail("invalid_refund_target")
+        amount = integer(body.get("amount"), 1, 10**9)
+        if self._refunded(pid) + amount > self.state["revisions"][pid][-1]["amount"]:
+            fail("refund_exceeds_payment")
+        self._afford({user_id: -amount, payment["from_user_id"]: amount})
+        refund = self._payment(user_id, payment["from_user_id"], amount,
+                               payment["note"], payment["visibility"], refund_of=pid)
+        self._commit_payments([refund])
+        return refund
+
+    def _correction_batch(self, body):
+        items = body.get("corrections")
+        if not isinstance(items, list) or not 1 <= len(items) <= 32:
+            fail()
+        # Establish the specified whole-container shape first; only then scan
+        # complete ordinary item validation in input order, never by field.
+        identifiers = set()
+        for item in items:
+            if not isinstance(item, dict):
+                fail()
+            pid = item.get("payment_id")
+            if not isinstance(pid, str) or not 1 <= len(pid) <= 64 or pid in identifiers:
+                fail()
+            identifiers.add(pid)
+        proposals, previous, deltas, settlements = {}, [], {}, {}
+        for item in items:
+            pid = item["payment_id"]
+            payment = self.state["payments"].get(pid)
+            if payment is None:
+                fail("not_found", 404)
+            if payment.get("authorization_id") is not None or payment.get("refund_of") is not None:
+                fail("linked_payment_immutable")
+            expected, amount, effective, reason = self._correction_fields(item)
+            latest = self.state["revisions"][pid][-1]
+            if expected != latest["revision"]:
+                fail("stale_revision", 409)
+            if amount < self._refunded(pid):
+                fail("refund_exceeds_payment")
+            proposals[pid] = {"payment_id": pid, "revision": expected + 1,
+                              "amount": amount, "effective_at": effective, "reason": reason}
+            previous.append(latest)
+            change = amount - latest["amount"]
+            for uid, delta in ((payment["from_user_id"], -change), (payment["to_user_id"], change)):
+                deltas[uid] = deltas.get(uid, 0) + delta
+            if payment.get("settlement_id") is not None:
+                settlements.setdefault(payment["settlement_id"], []).append(time_key(effective))
+        # Item errors have all been resolved before group constraints or funds.
+        for sid in settlements:
+            members = {pid for pid, p in self.state["payments"].items() if p.get("settlement_id") == sid}
+            if not members.issubset(proposals):
+                fail("incomplete_settlement")
+        if any(len(set(instants)) != 1 for instants in settlements.values()):
+            fail()
+        self._afford(deltas)
+        recorded, bid = self._recorded_after(previous), new_id("cb_")
+        for revision in proposals.values():
+            revision.update(recorded_at=recorded, correction_batch_id=bid)
+        self._assert_history(proposals)
         for uid, delta in deltas.items():
             self.state["users"][uid]["balance"] += delta
-        self.state["revisions"][pid].append(revision)
-        return revision
+        for pid, revision in proposals.items():
+            self.state["revisions"][pid].append(revision)
+        response = {"correction_batch_id": bid, "recorded_at": recorded, "revisions": list(proposals.values())}
+        self.state["correction_batches"][bid] = deepcopy(response)
+        return response
 
     def _assert_history(self, overrides):
         """Aggregate simultaneous money/hold events before testing a boundary."""
@@ -878,7 +967,7 @@ class Engine:
         return state
 
     def _validate_state(self, state):
-        if not isinstance(state, dict) or isinstance(state.get("schema"), bool) or state.get("schema") not in (1, 2, 3):
+        if not isinstance(state, dict) or isinstance(state.get("schema"), bool) or state.get("schema") not in (1, 2, 3, 4):
             fail()
         source_schema = state["schema"]
         legacy = state["schema"] == 1
@@ -1015,6 +1104,69 @@ class Engine:
             self._initialize_ledger(state)
         else:
             self._validate_ledger(state)
+        if source_schema < 4:
+            state.update(schema=4, correction_batches={})
+        self._validate_stage4(state)
+
+    def _validate_stage4(self, state):
+        """Validate portable refund links and immutable batch membership."""
+        payments, histories = state["payments"], state["revisions"]
+        refunded = {}
+        for pid, payment in payments.items():
+            target_id = payment.get("refund_of")
+            if target_id is not None:
+                if not isinstance(target_id, str) or target_id not in payments:
+                    fail()
+                target = payments[target_id]
+                if (target.get("refund_of") is not None
+                        or payment["from_user_id"] != target["to_user_id"]
+                        or payment["to_user_id"] != target["from_user_id"]
+                        or payment["note"] != target["note"] or payment["visibility"] != target["visibility"]
+                        or any(payment.get(link) is not None for link in ("request_id", "authorization_id", "settlement_id"))
+                        or payment["amount"] < 1):
+                    fail()
+                refunded[target_id] = refunded.get(target_id, 0) + payment["amount"]
+            if (target_id is not None or payment.get("authorization_id") is not None) and len(histories[pid]) != 1:
+                fail()
+        if any(amount > histories[pid][-1]["amount"] for pid, amount in refunded.items()):
+            fail()
+        batches = state.get("correction_batches")
+        if not isinstance(batches, dict):
+            fail()
+        linked = set()
+        for bid, batch in batches.items():
+            if (not isinstance(bid, str) or not 1 <= len(bid) <= 64 or not isinstance(batch, dict)
+                    or batch.get("correction_batch_id") != bid):
+                fail()
+            recorded = time_key(batch.get("recorded_at"))
+            revisions = batch.get("revisions")
+            if not isinstance(revisions, list) or not 1 <= len(revisions) <= 32:
+                fail()
+            seen, settlements = set(), {}
+            for revision in revisions:
+                if not isinstance(revision, dict):
+                    fail()
+                pid = revision.get("payment_id")
+                if not isinstance(pid, str) or pid not in histories or pid in seen:
+                    fail()
+                seen.add(pid)
+                number = integer(revision.get("revision"), 2, len(histories[pid]))
+                if (revision != histories[pid][number - 1] or revision.get("correction_batch_id") != bid
+                        or time_key(revision["recorded_at"]) != recorded):
+                    fail()
+                linked.add((pid, number))
+                sid = payments[pid].get("settlement_id")
+                if sid is not None:
+                    settlements.setdefault(sid, set()).add(time_key(revision["effective_at"]))
+            for sid, times in settlements.items():
+                members = {pid for pid, payment in payments.items() if payment.get("settlement_id") == sid}
+                if not members.issubset(seen) or len(times) != 1:
+                    fail()
+        for pid, history in histories.items():
+            for revision in history[1:]:
+                if ((revision.get("correction_batch_id") is not None or payments[pid].get("settlement_id") is not None)
+                        and (pid, revision["revision"]) not in linked):
+                    fail()
 
     def _validate_ledger(self, state):
         openings, revisions, snapshots = state.get("opening_balances"), state.get("revisions"), state.get("snapshots")
