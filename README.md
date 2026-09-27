@@ -14,7 +14,7 @@ Pocketful moves seeded test balances between wallets. It supports payments, requ
 - [stage-1/](stage-1/) through [stage-4/](stage-4/) are standalone, cumulative service outputs. Earlier accepted stages are preserved.
 - [verification/](verification/) contains the independent checks and their running instructions.
 
-The final stage implementation at `42400632c8fef65555b936b987ecf1970df5f540` passed all 193 supplied public checks and 148 independent functional groups locally. Separate probes covered ordinary HTTP origins, accessibility, populated upgrades from stages 1–3 and an already-open browser during upgrade. These results are local evidence, not an organizer score or a claim about hidden tests.
+The final stage implementation at `42400632c8fef65555b936b987ecf1970df5f540` passed all 193 supplied public checks and 148 independent functional groups locally. Separate probes covered ordinary HTTP origins, accessibility, populated upgrades from stages 1–3 and an already-open browser during upgrade. A new anonymous clone of the public repository also passed all four standalone outputs (710 test executions) and the RUN.md/browser smoke checks; see [PUBLIC_VALIDATION.json](PUBLIC_VALIDATION.json). These results are local evidence, not an organizer score or a claim about hidden tests.
 
 ## Run the app
 

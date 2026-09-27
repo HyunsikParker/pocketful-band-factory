@@ -4,14 +4,14 @@
   "dispatch_at": "2026-09-27T04:12:05.403Z",
   "terminal_report_at": "2026-09-27T07:19:50.713Z",
   "elapsed_seconds": 11265.31,
-  "usage_observed_at": "2026-09-27T07:20:43.787435+00:00",
-  "usage_scope": "Exact four runtime cumulative counters sampled after terminal report; includes final closeout, excludes operator work.",
+  "usage_observed_at": "2026-09-27T07:44:22.338694+00:00",
+  "usage_scope": "Exact four runtime cumulative counters sampled after supported worker stop; includes delayed post-terminal message processing. Operator runtime usage is excluded.",
   "aggregate_usage": {
-    "input_tokens": 187569635,
-    "cached_input_tokens": 184042880,
-    "output_tokens": 636569,
-    "reasoning_output_tokens": 163728,
-    "total_tokens": 188206204
+    "input_tokens": 231670714,
+    "cached_input_tokens": 227861888,
+    "output_tokens": 647301,
+    "reasoning_output_tokens": 163851,
+    "total_tokens": 232318015
   },
   "seats": [
     {
@@ -19,14 +19,15 @@
       "models": [
         "gpt-6-astra"
       ],
-      "last_token_event": "2026-09-27T07:20:43.151Z",
+      "last_token_event": "2026-09-27T07:43:12.148Z",
       "total_token_usage": {
-        "input_tokens": 58261883,
-        "cached_input_tokens": 57309184,
-        "output_tokens": 212465,
-        "reasoning_output_tokens": 99378,
-        "total_tokens": 58474348
-      }
+        "input_tokens": 98669160,
+        "cached_input_tokens": 97560064,
+        "output_tokens": 221104,
+        "reasoning_output_tokens": 99489,
+        "total_tokens": 98890264
+      },
+      "worker_running": false
     },
     {
       "seat": "core",
@@ -40,7 +41,8 @@
         "output_tokens": 101558,
         "reasoning_output_tokens": 13051,
         "total_tokens": 28904236
-      }
+      },
+      "worker_running": false
     },
     {
       "seat": "interface",
@@ -54,21 +56,23 @@
         "output_tokens": 123889,
         "reasoning_output_tokens": 20248,
         "total_tokens": 35811004
-      }
+      },
+      "worker_running": false
     },
     {
       "seat": "verifier",
       "models": [
         "gpt-6-astra"
       ],
-      "last_token_event": "2026-09-27T07:18:59.505Z",
+      "last_token_event": "2026-09-27T07:28:36.863Z",
       "total_token_usage": {
-        "input_tokens": 64817959,
-        "cached_input_tokens": 63447296,
-        "output_tokens": 198657,
-        "reasoning_output_tokens": 31051,
-        "total_tokens": 65016616
-      }
+        "input_tokens": 68511761,
+        "cached_input_tokens": 67015424,
+        "output_tokens": 200750,
+        "reasoning_output_tokens": 31063,
+        "total_tokens": 68712511
+      },
+      "worker_running": false
     }
   ],
   "cached_input_included_in_input": true,
@@ -76,5 +80,17 @@
   "all_counters_monotonic": true,
   "usd_spend": null,
   "billing_basis": "Configured Codex subscription; no per-run invoice or verified USD charge available.",
-  "elapsed_time_basis": "Both timestamps from the unchanged full room export; native dispatch-receipt and coordinator-local timestamps differ by fractions of a second."
+  "elapsed_time_basis": "Both timestamps from the unchanged full room export; native dispatch-receipt and coordinator-local timestamps differ by fractions of a second.",
+  "build_closeout_usage_snapshot": {
+    "observed_at": "2026-09-27T07:20:43.787435+00:00",
+    "aggregate_usage": {
+      "input_tokens": 187569635,
+      "cached_input_tokens": 184042880,
+      "output_tokens": 636569,
+      "reasoning_output_tokens": 163728,
+      "total_tokens": 188206204
+    }
+  },
+  "workers_stopped_verified": true,
+  "post_terminal_processed_tokens": 44111811
 }

@@ -1,0 +1,101 @@
+{
+  "scope": "Operator check from a new anonymous clone of the public GitHub repository; local verification, not organizer scoring.",
+  "public_repository": "https://github.com/HyunsikParker/pocketful-band-factory",
+  "tested_commit": "0c77cb764eb95f311440b23155d00529eb7a79b1",
+  "stages": [
+    {
+      "folder": "stage-1",
+      "revision": "0c77cb764eb95f311440b23155d00529eb7a79b1",
+      "claimed_stage": "1",
+      "passed": 147,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "report_sha256": "9bbac0bca812433908750a9fc22f506aa2beda83182ed76be7794d292d7cc48a"
+    },
+    {
+      "folder": "stage-2",
+      "revision": "0c77cb764eb95f311440b23155d00529eb7a79b1",
+      "claimed_stage": "2",
+      "passed": 182,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "report_sha256": "98723740ec5267677f118fda9e02f1657d73e453258dc7137a842357cb742bfc"
+    },
+    {
+      "folder": "stage-3",
+      "revision": "0c77cb764eb95f311440b23155d00529eb7a79b1",
+      "claimed_stage": "3",
+      "passed": 188,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "report_sha256": "aaabfcc39a613151632184970fbfbc829f2252f549ff55143017bcbb80dec75a"
+    },
+    {
+      "folder": "stage-4",
+      "revision": "0c77cb764eb95f311440b23155d00529eb7a79b1",
+      "claimed_stage": "4",
+      "passed": 193,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "report_sha256": "6106a616e09642486a30616a86bc9d77fc18f13e6c2b529d070e6123d0e3c059"
+    }
+  ],
+  "total_check_executions": 710,
+  "distinct_test_count_not_claimed": true,
+  "run_md_smoke": [
+    {
+      "stage": 1,
+      "passed": true,
+      "port": 8080,
+      "health_and_signup_seconds": 0.2736160410568118,
+      "constraints": {
+        "network": "none",
+        "cpu": 2000000000,
+        "memory": 2147483648,
+        "user": "65532:65532"
+      }
+    },
+    {
+      "stage": 2,
+      "passed": true,
+      "port": 9090,
+      "health_and_signup_seconds": 0.25774258305318654,
+      "constraints": {
+        "network": "none",
+        "cpu": 2000000000,
+        "memory": 2147483648,
+        "user": "65532:65532"
+      }
+    },
+    {
+      "stage": 3,
+      "passed": true,
+      "port": 9090,
+      "health_and_signup_seconds": 0.2540342500433326,
+      "constraints": {
+        "network": "none",
+        "cpu": 2000000000,
+        "memory": 2147483648,
+        "user": "65532:65532"
+      }
+    },
+    {
+      "stage": 4,
+      "passed": true,
+      "port": 9090,
+      "health_and_signup_seconds": 0.26838937494903803,
+      "constraints": {
+        "network": "none",
+        "cpu": 2000000000,
+        "memory": 2147483648,
+        "user": "65532:65532"
+      }
+    }
+  ],
+  "first_operator_attempt": "Operational output-mount failure: pytest output passed but counts were written only inside the Colima VM. Original logs preserved privately; this summary describes the subsequent run after a successful bidirectional output-mount preflight.",
+  "subsequent_closeout_changes": "Only operator documentation, resource counters and the full room export changed; the four production stage trees, mandates and verification sources stayed unchanged."
+}

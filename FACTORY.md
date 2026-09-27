@@ -74,19 +74,21 @@ All four stage directories passed from a new local clone at `bccf663516e9c198b42
 
 That is 710 test executions across separate outputs, including inherited checks repeated against later stages. The final application also passed 148 distinct independent functional groups, separate HTTP/accessibility probes, populated upgrades from each earlier stage and an open-browser upgrade. Each RUN.md was exercised with a clean build; browser stages passed signup, navigation and logout. The four frozen stage trees remained unchanged.
 
-The final factory history has 20 commits: core 5, interface 6, verifier 4 and coordinator 5. The coordinator's stage copies are integration work, not original service implementation. Later operator documentation and packaging commits are separate from this count.
+The autonomous factory history has 20 commits: core 5, interface 6, verifier 4 and coordinator 5. The coordinator's stage copies are integration work, not original service implementation. Later operator documentation and packaging commits are separate from this count.
 
-Provider counters were sampled at **2026-09-27 07:20:43.787 UTC**, after the terminal report and its final closeout. They cover the four exact runtime sessions; they exclude the operator's preparation and submission work.
+Provider counters were sampled at **2026-09-27 07:44:22.339 UTC**, after all four workers were stopped. They cover the exact four runtime sessions, including delayed post-terminal message processing. The operator's separate runtime is excluded.
 
 | Provider counter | Tokens |
 | --- | ---: |
-| Input | 187,569,635 |
-| Cached input, already included above | 184,042,880 |
-| Output | 636,569 |
-| Reasoning output, already included above | 163,728 |
-| Total input + output | 188,206,204 |
+| Input | 231,670,714 |
+| Cached input, already included above | 227,861,888 |
+| Output | 647,301 |
+| Reasoning output, already included above | 163,851 |
+| Total input + output | 232,318,015 |
 
-These are cumulative processed-token counters, not unique words or newly generated context. Repeated full-specification handoffs and long-running conversations contributed to the input volume; cached input accounts for about 98.1% of input. The four-seat review process produced reproducible repairs and portable tests, but this run does not establish that it is token-efficient. No comparison with a single-agent factory was performed.
+An earlier snapshot shortly after the terminal report recorded 188,206,204 tokens. The additional 44,111,811 processed tokens accumulated during post-terminal message handling before worker shutdown. This overhead is included in the table rather than hidden from the resource total.
+
+These are cumulative processed-token counters, not unique words or newly generated context. Repeated full-specification handoffs and long-running conversations contributed to the input volume; cached input accounts for about 98.4% of input. The four-seat review process produced reproducible repairs and portable tests, but this run does not establish that it is token-efficient. No comparison with a single-agent factory was performed.
 
 All four runtimes used the configured Codex subscription. No per-run invoice or verified USD charge was available, so monetary spend is **unknown**, not zero. No paid API account, billing card or separately purchased compute was provisioned for this run. [resources.json](resources.json) preserves the per-seat counters and measurement basis without provider transcripts or credentials.
 
@@ -94,7 +96,7 @@ All four runtimes used the configured Codex subscription. No per-run invoice or 
 
 The terminal report marks completion of the autonomous service build, not submission eligibility. At that point `harness check` correctly failed because the operator-owned README, FACTORY and whole-room export were absent. The operator assembled those materials after termination, without changing stage code, mandates, verification sources or the original commit history.
 
-The submitted run received no operator steering, debugging hint, approval or restart after its initial dispatch. The room export retains the full collaboration and terminal report. Local tests do not establish a hidden-test result, rank or award.
+Between the initial dispatch and the coordinator terminal report, the submitted run received no operator steering, debugging hint, approval or restart. After the terminal report, delayed messages continued and the verifier emitted one unrelated memory-maintenance report. The operator stopped exactly the four factory workers using the supported controls and downloaded the full room again. All previously exported message contents remain unchanged; the console export also preserves the later events. No stage, mandate or verification-source changes occurred during this closeout. The room export retains the full collaboration, terminal report and post-terminal tail. Local tests do not establish a hidden-test result, rank or award.
 
 The reviewers recorded finite-test and interpretation limits: Chromium was tested, not every browser or assistive technology; leap-second handling is structural and offline; simultaneous historical solvency uses net effects while intermediate statement rows may be signed; inconsistent future-created already-open seeded holds are not treated as delayed reservations; batch shape and duplicate-ID checks precede ordered semantic errors. These interpretations are not organizer clarifications.
 
