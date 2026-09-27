@@ -31,10 +31,11 @@
     return Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
   }
   function formatted(value, units = me?.minor_units ?? 2, currency = me?.currency ?? "EUR") {
-    const amount = BigInt(value);
+    const signed = BigInt(value);
+    const amount = signed < 0n ? -signed : signed;
     const scale = 10n ** BigInt(units);
     const whole = amount / scale;
-    return `${whole}${units ? "." + (amount % scale).toString().padStart(units, "0") : ""} ${currency}`;
+    return `${signed < 0n ? "−" : ""}${whole}${units ? "." + (amount % scale).toString().padStart(units, "0") : ""} ${currency}`;
   }
   function decimal(value) {
     const amount = BigInt(value);
@@ -42,14 +43,14 @@
     const scale = 10n ** BigInt(units);
     return `${amount / scale}${units ? "." + (amount % scale).toString().padStart(units, "0") : ""}`;
   }
-  function minor(raw) {
+  function minor(raw, allowZero = false) {
     if (!me) throw new Error("Your wallet is still loading. Please try again.");
     const input = raw.trim();
     if (!/^(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)$/.test(input)) throw new Error("Enter an amount using digits and a decimal point.");
     const [whole, fraction = ""] = input.split(".");
     if (fraction.length > me.minor_units) throw new Error(`Use no more than ${me.minor_units} decimal places for ${me.currency}.`);
     const value = BigInt(whole || "0") * (10n ** BigInt(me.minor_units)) + BigInt(fraction.padEnd(me.minor_units, "0") || "0");
-    if (value < 1n || value > 1000000000n) throw new Error("Enter an amount greater than zero and within the payment limit.");
+    if (value < (allowZero ? 0n : 1n) || value > 1000000000n) throw new Error(allowZero ? "Enter zero or a positive amount within the payment limit." : "Enter an amount greater than zero and within the payment limit.");
     return Number(value);
   }
   function message(error) {
@@ -61,6 +62,9 @@
       authorization_not_open: "This authorization is no longer open. We’ve refreshed the list.",
       authorization_expired: "This authorization has expired. The remaining funds have been released.",
       capture_exceeds_authorization: "The capture is greater than the remaining authorized amount.",
+      stale_revision: "This payment has a newer revision. Review its history, then use the latest revision before submitting again.",
+      historical_overdraft: "This change would leave a wallet short at an earlier point in time. Adjust the amount or effective time.",
+      linked_payment_immutable: "This payment belongs to a settlement or capture and cannot be corrected individually.",
       forbidden: "This action isn’t available to your account.",
       email_taken: "An account already uses this email. Try signing in.",
       handle_taken: "An account already uses the handle derived from this email. Use another email.",
@@ -123,9 +127,9 @@
       const originalLabel = button.textContent;
       state.busy = true; button.disabled = true; button.textContent = "Working…";
       feedback(config.feedback, `${config.name}-loading`, "loading", "Confirming your action…");
-      let outcome;
+      let outcome, result;
       try {
-        await api(config.path(), {method: "POST", body: attempt.body,
+        result = await api(config.path(), {method: "POST", body: attempt.body,
           headers: config.keyed === false ? {} : {"Idempotency-Key": attempt.key}});
         outcome = "success";
         if (attempt === state.attempt && attempt.version === state.version) feedback(config.feedback, `${config.name}-success`, "success", config.success);
@@ -141,7 +145,10 @@
       } finally {
         state.busy = false; button.disabled = false; button.textContent = originalLabel;
       }
-      if (outcome !== "uncertain") await refresh();
+      if (outcome !== "uncertain") {
+        await refresh();
+        await config.afterOutcome?.(outcome, result);
+      }
     });
   }
 
@@ -208,7 +215,9 @@
         el("div", {class: "record-top"}, text("div", `${payment.from_handle} → ${payment.to_handle}`, {class: "record-people", ...test(`activity-parties-${id}`)}),
           text("div", formatted(payment.amount), {class: "record-money", ...test(`activity-amount-${id}`)})),
         text("p", payment.note, {class: "record-note", ...test(`activity-note-${id}`)}),
-        el("div", {class: "record-meta"}, text("span", direction), badge(payment.visibility), text("time", dateLabel(payment.created_at), {datetime: payment.created_at}))));
+        el("div", {class: "record-meta"}, text("span", direction), badge(payment.visibility), text("time", dateLabel(payment.created_at), {datetime: payment.created_at})),
+        text("p", "Original receipt", {class: "date-exact"}),
+        payment.from_user_id === me.user_id || payment.to_user_id === me.user_id ? historyLink(id) : null));
     }
     container.append(list);
     if (activityMore) container.append(text("button", "Show older activity", {type: "button", class: "secondary load-more", onclick: async (event) => {
@@ -320,6 +329,180 @@
     refs.authorizations.append(list);
   }
 
+  function instant(raw, label, optional = true, pastOnly = false) {
+    const value = raw.trim();
+    if (!value && optional) return null;
+    const parts = /^(\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?([Zz]|[+-]\d{2}:\d{2})$/.exec(value);
+    if (!parts) throw new Error(`${label}: use a complete timestamp with Z or an offset, for example 2026-09-24T13:20:00+00:00.`);
+    const [, year, month, day, hour, minute, second, zone] = parts;
+    const days = new Date(Date.UTC(Number(year), Number(month), 0)).getUTCDate();
+    if (+month < 1 || +month > 12 || +day < 1 || +day > days || +hour > 23 || +minute > 59 || +second > 59 ||
+        (zone.length > 1 && (+zone.slice(1, 3) > 23 || +zone.slice(4) > 59)) || !Number.isFinite(Date.parse(value)))
+      throw new Error(`${label}: enter a valid calendar date, time and offset.`);
+    if (pastOnly && Date.parse(value) > Date.now()) throw new Error(`${label} cannot be in the future.`);
+    return value;
+  }
+  function timeField(id, label, optional = true) {
+    return field(id, label, {wide: true, placeholder: optional ? "Leave blank for the default" : "2026-09-24T13:20:00+00:00",
+      help: "ISO date and time, including Z or an explicit offset (such as +02:00)."});
+  }
+  function historyLink(id, label = "Receipt & revision history") {
+    return el("a", {href: `/history?payment=${encodeURIComponent(id)}`, class: "history-link"}, label);
+  }
+  function moneyFact(label, value, id) {
+    return el("div", {}, text("dt", label), text("dd", formatted(value), id ? test(id) : {}));
+  }
+  function temporalBalanceScreen() {
+    const form = el("form", {class: "card", novalidate: true});
+    const asOf = timeField("history-as-of", "Balance at (inclusive)");
+    const known = timeField("history-known-at", "Using information known by");
+    const status = el("div", {"aria-live": "polite"}), result = el("div", {"aria-live": "polite"});
+    const button = text("button", "View historical balance", {class: "primary", type: "submit", ...test("history-balance-submit")});
+    let read = 0;
+    form.append(cardTitle("Your wallet through time", "The balance at a point in time, using only the information known by your chosen date."),
+      el("div", {class: "fields"}, asOf.wrap, known.wrap), el("div", {class: "form-actions"}, button), status, result);
+    form.addEventListener("submit", async event => {
+      event.preventDefault(); const current = ++read; const params = new URLSearchParams();
+      try {
+        const at = instant(asOf.input.value, "Balance at"), knowledge = instant(known.input.value, "Known by");
+        if (at) params.set("as_of", at); if (knowledge) params.set("known_at", knowledge);
+        feedback(status, "history-balance-loading", "loading", "Reading this historical view…");
+        const user = await api(`/me?${params}`);
+        if (current !== read) return;
+        clearFeedback(status);
+        result.replaceChildren(text("p", `Historical view · at ${at || "the time of this read"} · known by ${knowledge || "the time of this read"}`, {class: "subtext temporal-caption"}),
+          el("dl", {class: "history-money"}, moneyFact("Available in this view", user.available, "history-available"), moneyFact("Total", user.total, "history-total"), moneyFact("Held", user.held, "history-held")));
+      } catch (error) { if (current === read) feedback(status, "history-balance-error", "error", message(error)); }
+    });
+    return form;
+  }
+  function statementScreen() {
+    const section = el("section", {class: "card"});
+    const form = el("form", {novalidate: true});
+    const from = timeField("statement-from", "From (inclusive)");
+    const to = timeField("statement-to", "To (exclusive)");
+    const known = timeField("statement-known-at", "Using information known by");
+    const limit = field("statement-limit", "Entries per page", {choices: [["10", "10"], ["25", "25"], ["50", "50"], ["1", "1"]]});
+    const submit = text("button", "Create a fresh statement", {class: "primary", type: "submit", ...test("statement-submit")});
+    const status = el("div", {"aria-live": "polite"}), results = el("div", {"aria-live": "polite"});
+    let snapshot = null, offset = 0, size = 10, read = 0, caption = "";
+    form.append(cardTitle("A statement that stays put", "Each statement is a saved view. New payments and corrections will not change it while you turn the pages."),
+      el("div", {class: "fields"}, from.wrap, to.wrap, known.wrap, limit.wrap), el("div", {class: "form-actions"}, submit));
+    section.append(form, status, results);
+    async function load(nextOffset, fresh) {
+      const current = ++read;
+      try {
+        const params = new URLSearchParams();
+        let nextSize = size, nextCaption = caption;
+        if (fresh) {
+          for (const [key, input, label] of [["from", from.input, "From"], ["to", to.input, "To"], ["known_at", known.input, "Known by"]]) {
+            const value = instant(input.value, label); if (value) params.set(key, value);
+          }
+          nextSize = Number(limit.input.value);
+          nextCaption = `From ${params.get("from") || "wallet opening"} · to ${params.get("to") || "the time this snapshot was created"} · known by ${params.get("known_at") || "the time this snapshot was created"}`;
+        } else params.set("snapshot", snapshot);
+        params.set("limit", nextSize); params.set("offset", nextOffset);
+        feedback(status, "statement-loading", "loading", "Reading your statement…");
+        const data = await api(`/statement?${params}`);
+        if (current !== read) return;
+        snapshot = data.snapshot; offset = nextOffset; size = nextSize; caption = nextCaption;
+        clearFeedback(status);
+        const list = el("div", {class: "record-list", ...test("statement-list")});
+        for (const entry of data.entries) {
+          const p = entry.payment, id = p.payment_id;
+          const delta = BigInt(entry.delta);
+          list.append(el("article", {class: "record", ...test(`statement-item-${id}`), "data-revision": entry.revision},
+            el("div", {class: "record-top"}, text("strong", `${p.from_handle} → ${p.to_handle}`), text("span", `${delta < 0n ? "−" : delta > 0n ? "+" : ""}${formatted(delta < 0n ? -delta : delta)}`, {class: "record-money", ...test(`statement-delta-${id}`)})),
+            text("p", p.note, {class: "record-note"}), text("p", `Selected revision ${entry.revision} · ${formatted(p.amount)}`, {class: "subtext"}),
+            text("p", `Effective: ${entry.effective_at}`, {class: "date-exact"}), text("p", `Recorded: ${entry.recorded_at}`, {class: "date-exact"}),
+            el("p", {class: "subtext"}, "Balance after: ", text("span", formatted(entry.balance_after), test(`statement-after-${id}`))), historyLink(id)));
+        }
+        if (!data.entries.length) list.append(empty("empty-statement", "No movements in this view", "Try another time window or create a fresh statement."));
+        const previous = text("button", "Previous page", {type: "button", class: "secondary", disabled: offset === 0, ...test("statement-previous"), onclick: () => load(Math.max(0, offset - size), false)});
+        const next = text("button", "Next page", {type: "button", class: "secondary", disabled: !data.has_more, ...test("statement-next"), onclick: () => load(offset + size, false)});
+        results.replaceChildren(text("p", caption, {class: "subtext temporal-caption", ...test("statement-window")}),
+          el("dl", {class: "history-money"}, moneyFact("Opening balance", data.opening_balance, "statement-opening"), moneyFact("Closing balance", data.closing_balance, "statement-closing")),
+          text("p", "Saved snapshot · balances describe the entire window, not just this page.", {class: "snapshot-label", ...test("statement-snapshot")}), list,
+          el("div", {class: "record-actions pagination"}, previous, text("span", `Page ${Math.floor(offset / size) + 1}`, test("statement-page")), next));
+      } catch (error) { if (current === read) feedback(status, "statement-error", "error", error.code === "not_found" ? "This saved statement is no longer available. Create a fresh statement." : message(error)); }
+    }
+    form.addEventListener("submit", event => { event.preventDefault(); load(0, true); });
+    refs.startTemporal = () => load(0, true);
+    return section;
+  }
+  function historyScreen() {
+    const section = el("section", {class: "card"});
+    const list = el("div", {class: "record-list", ...test("history-list")});
+    const detail = el("section", {class: "card history-detail", tabindex: "-1", ...test("history-detail")});
+    const status = el("div", {"aria-live": "polite"});
+    let selection = 0;
+    section.append(cardTitle("Original receipts", "These amounts are the original payments. Open a receipt to inspect its immutable revision history."), status, list);
+    async function open(payment) {
+      const current = ++selection, id = payment.payment_id;
+      detail.replaceChildren(text("p", "Loading revision history…", {role: "status"}));
+      try {
+        const data = await api(`/payments/${encodeURIComponent(id)}/revisions`);
+        if (current !== selection) return;
+        const original = data.revisions[0], latest = data.revisions.at(-1);
+        const revisions = el("div", {class: "record-list", ...test("revision-list")});
+        function draw(rows) {
+          revisions.replaceChildren(...rows.map(revision => el("article", {class: "record", ...test(`revision-${revision.revision}`)},
+            el("div", {class: "record-top"}, text("strong", `Revision ${revision.revision}${revision.revision === 1 ? " · original" : ""}`), text("span", formatted(revision.amount), {class: "record-money"})),
+            text("p", `Effective: ${revision.effective_at}`, {class: "date-exact"}), text("p", `Recorded: ${revision.recorded_at}`, {class: "date-exact"}), text("p", revision.reason || "Original payment", {class: "record-note"}))));
+        }
+        draw(data.revisions);
+        detail.replaceChildren(cardTitle("Receipt & revision history", `${payment.from_handle} → ${payment.to_handle}`),
+          text("p", `Original receipt: ${formatted(original.amount)}`, {class: "original-receipt", ...test("original-receipt")}),
+          text("p", `Money moved: ${payment.created_at}`, {class: "date-exact"}), text("p", payment.note, {class: "record-note"}), revisions);
+        if (payment.from_user_id === me.user_id && !payment.authorization_id && !payment.settlement_id) {
+          const form = el("form", {novalidate: true, class: "correction-form"});
+          const amount = field("correction-amount", "Corrected amount", {money: true, help: "Zero reverses the full payment. This replaces the amount; it is not an additional payment."});
+          const expected = field("correction-expected", "Expected revision", {help: "Matches the current revision. A newer revision must be reviewed before retrying."});
+          expected.input.readOnly = true; expected.input.value = latest.revision;
+          amount.input.value = decimal(latest.amount);
+          const effective = timeField("correction-effective", "Effective at", false); effective.input.value = latest.effective_at;
+          const reason = field("correction-reason", "Reason for correction", {wide: true, multiline: true, help: "Required · 1–200 characters"});
+          const feedbackBox = el("div", {"aria-live": "polite"});
+          const button = text("button", "Save correction", {type: "submit", class: "primary", ...test("correction-submit")});
+          let latestRevision = latest.revision;
+          const reload = text("button", "Review latest history", {type: "button", class: "secondary", ...test("revision-refresh"), onclick: async () => {
+            try { const updated = await api(`/payments/${encodeURIComponent(id)}/revisions`); if (current !== selection) return; draw(updated.revisions); latestRevision = updated.revisions.at(-1).revision; }
+            catch (error) { feedback(feedbackBox, "correction-error", "error", message(error)); }
+          }});
+          const adopt = text("button", "Use latest revision", {type: "button", class: "secondary", ...test("correction-use-latest"), onclick: async () => {
+            try { const updated = await api(`/payments/${encodeURIComponent(id)}/revisions`); if (current !== selection) return; draw(updated.revisions); latestRevision = updated.revisions.at(-1).revision;
+              expected.input.value = latestRevision; expected.input.dispatchEvent(new Event("input", {bubbles: true})); }
+            catch (error) { feedback(feedbackBox, "correction-error", "error", message(error)); }
+          }});
+          form.append(cardTitle("Correct this payment", "The original receipt stays unchanged. Corrections adjust the same two wallets and must keep their history affordable."),
+            el("div", {class: "fields"}, amount.wrap, expected.wrap, effective.wrap, reason.wrap), el("div", {class: "record-actions"}, button, reload, adopt), feedbackBox);
+          wireWrite(form, {name: `correction-${id}`, button, feedback: feedbackBox, errorId: "correction-error", uncertainId: "correction-uncertain", path: () => `/payments/${encodeURIComponent(id)}/corrections`,
+            body: () => { const length = Array.from(reason.input.value).length; if (!length || length > 200) throw new Error("Add a reason of 1–200 characters.");
+              return {expected_revision: Number(expected.input.value), amount: minor(amount.input.value, true), effective_at: instant(effective.input.value, "Effective at", false, true), reason: reason.input.value}; },
+            raw: () => [expected.input.value, amount.input.value, effective.input.value, reason.input.value], success: "Correction saved. Original receipts and existing statement snapshots remain unchanged.",
+            afterOutcome: async () => { try { const updated = await api(`/payments/${encodeURIComponent(id)}/revisions`); if (current !== selection) return; draw(updated.revisions); latestRevision = updated.revisions.at(-1).revision; } catch {} }});
+          detail.append(form);
+        } else detail.append(text("p", payment.from_user_id !== me.user_id ? "Only the original sender can correct this payment." : "Settlement members and captures cannot be corrected individually.", {class: "subtext"}));
+        detail.focus();
+      } catch (error) { if (current === selection) feedback(detail, "history-error", "error", message(error)); }
+    }
+    refs.startTemporal = async () => {
+      try {
+        const payments = (await allItems("/activity", "payments")).filter(p => p.from_user_id === me.user_id || p.to_user_id === me.user_id);
+        list.replaceChildren(...payments.map(p => el("article", {class: "record"},
+          el("div", {class: "record-top"}, text("strong", `${p.from_handle} → ${p.to_handle}`), text("span", formatted(p.amount), {class: "record-money"})),
+          text("p", p.note, {class: "record-note"}), text("p", `Original · ${dateLabel(p.created_at)}`, {class: "subtext"}),
+          text("button", "View receipt & history", {type: "button", class: "secondary", ...test(`history-open-${p.payment_id}`), onclick: () => open(p)}))));
+        if (!payments.length) list.append(empty("empty-history", "No payment history yet", "Your own sent and received payments will appear here."));
+        const requested = new URLSearchParams(location.search).get("payment");
+        const payment = payments.find(p => p.payment_id === requested);
+        if (payment) await open(payment);
+        else if (requested) feedback(status, "history-error", "error", "This receipt is not available to your account.");
+      } catch (error) { feedback(status, "history-error", "error", message(error)); }
+    };
+    return el("div", {class: "column"}, temporalBalanceScreen(), el("div", {class: "workspace history-workspace"}, section, detail));
+  }
+
   async function allItems(path, key) {
     const rows = []; let offset = 0;
     for (;;) {
@@ -341,6 +524,7 @@
       if (route === "/requests") renderRequests(data);
       if (route === "/authorizations") renderAuthorizations(data);
       refs.preview?.();
+      if (refs.startTemporal) { const start = refs.startTemporal; refs.startTemporal = null; await start(); }
     } catch (error) {
       if (current !== generation) return;
       feedback(refs.global, "page-error", "error", message(error));
@@ -354,7 +538,7 @@
     refs.loading = el("p", {class: "page-loading", role: "status"});
     refs.main = el("main", {id: "main", tabindex: "-1"});
     const nav = el("nav", {class: "nav", "aria-label": "Main navigation"});
-    for (const [href, label, symbol] of [["/", "Wallet", "◈"], ["/requests", "Requests", "↔"], ["/split", "Split a bill", "÷"], ["/authorizations", "Authorizations", "◷"]]) {
+    for (const [href, label, symbol] of [["/", "Wallet", "◈"], ["/requests", "Requests", "↔"], ["/split", "Split a bill", "÷"], ["/authorizations", "Authorizations", "◷"], ["/statements", "Statements", "≡"], ["/history", "History", "↶"]]) {
       nav.append(el("a", {href, ...(route === href ? {"aria-current": "page"} : {})}, text("span", symbol, {class: "nav-symbol", "aria-hidden": "true"}), label));
     }
     root.replaceChildren(el("div", {class: "shell"}, el("aside", {class: "sidebar"},
@@ -391,7 +575,9 @@
     const titles = {"/": ["Your wallet", "A clear view of your money, and the people you share it with."],
       "/requests": ["Requests", "Stay on top of what’s coming in and what you owe."],
       "/split": ["Split a bill", "Keep the good part of sharing. We’ll handle the arithmetic."],
-      "/authorizations": ["Authorizations", "Money set aside. Ready to collect, or release when plans change."]};
+      "/authorizations": ["Authorizations", "Money set aside. Ready to collect, or release when plans change."],
+      "/statements": ["Statements", "Your money movements, with the full story behind the numbers."],
+      "/history": ["History & corrections", "Look back with confidence. Original receipts always stay original."]};
     const [title, caption] = titles[route] || titles["/"];
     const refreshButton = text("button", "↻ Refresh", {type: "button", class: "secondary", ...test("wallet-refresh"), onclick: refresh});
     refs.main.append(el("section", {class: "heading"}, el("div", {}, text("p", "POCKETFUL / " + (route === "/" ? "OVERVIEW" : title.toUpperCase()), {class: "eyebrow"}), text("h1", title), text("p", caption, {class: "subtext"})), refreshButton), refs.global, refs.loading);
@@ -413,6 +599,8 @@
       refs.main.append(refs.authorizationFeedback, el("div", {class: "workspace"}, el("section", {class: "card"}, cardTitle("Your authorizations", "Only you and the other person can see an open hold."), refs.authorizations),
         el("div", {class: "column"}, transferForm("authorize"))));
     }
+    else if (route === "/statements") refs.main.append(statementScreen());
+    else if (route === "/history") refs.main.append(historyScreen());
     refresh();
   }
   shell();

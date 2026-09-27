@@ -1,10 +1,10 @@
-# Run Pocketful — Stage 2
+# Run Pocketful — Stage 3
 
 From this folder, build and start the single-container API:
 
 ```sh
-docker build -t pocketful-stage-2 .
-docker run --rm --name pocketful-stage-2 --cpus=2 --memory=2g -e PORT=8080 -p 8080:8080 pocketful-stage-2
+docker build -t pocketful-stage-3 .
+docker run --rm --name pocketful-stage-3 --cpus=2 --memory=2g -e PORT=8080 -p 8080:8080 pocketful-stage-3
 ```
 
 Readiness: `curl http://localhost:8080/health` returns `{"status":"ok"}`.
@@ -27,7 +27,7 @@ come from the fixture. Signup creates an account with zero balance.
 
 Log in through `/auth/login`, then send `Authorization: Bearer <token>`.
 `/payments`, `/requests`, `/requests/{id}/pay`, `/splits`, `/settlements`,
-`/authorizations`, and `/authorizations/{id}/capture`
+`/authorizations`, `/authorizations/{id}/capture`, and `/payments/{id}/corrections`
 require `Idempotency-Key`. Monetary amounts are integer minor units. Settlement
 operator permissions come from the fixture.
 
@@ -56,8 +56,30 @@ A missing response is marked uncertain, not refused. Click the same action to
 recover its receipt without paying twice. Refresh uses only the latest requested
 read, and never clears the payment form. There is no background polling.
 
-Stage-1 exports can be imported without regenerating sessions or retry receipts.
+Stage-1 and stage-2 exports can be imported without regenerating sessions or retry receipts.
 An already-open browser retains its form and pending attempt through an import
 between requests. The session is stored in the browser’s local storage; signing
 out removes it from this browser without invalidating other active sessions.
 No page-reload recovery of an unfinished form is required or promised.
+
+## Statements, history and corrections
+
+Open `/statements` for a saved, paginated view of your own money movements. The
+JSON API stays at `/statement`. From is inclusive, to is exclusive; optional
+known-at selects the information available at that instant. Previous/next keep
+the same server snapshot and full-window balances even after new payments or
+corrections. Create a fresh statement to include later changes.
+
+Open `/history` to read original receipts and revision history, or to query total,
+held and available funds at an inclusive as-of instant. All time filters accept
+RFC 3339 timestamps with `Z` or an explicit offset. Current wallet funds remain
+separate from the labeled historical view.
+
+Original senders can correct eligible direct/request payments from their receipt.
+The amount replaces the current amount; zero reverses it. The original receipt,
+activity entry and earlier retry responses stay unchanged. A stale revision
+refusal keeps the draft editable: review the latest history, choose "Use latest
+revision", then submit. An uncertain response keeps the original body and key
+for a safe retry, including on ordinary HTTP origins. Captures and settlement
+members cannot be corrected individually. Refunds and correction batches are
+not included in this stage.
