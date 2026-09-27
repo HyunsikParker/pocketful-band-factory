@@ -1,0 +1,5 @@
+*
+!Dockerfile
+!engine.py
+!auth.py
+!server.py

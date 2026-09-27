@@ -1,0 +1,18 @@
+{
+  "official_source_revision": "803560d2a678ace1414465c098eb0ab5380ffade",
+  "meaning": "Local specification-based acceptance, not organizer score, rank or award",
+  "stages": {
+    "1": {
+      "production_revision": "21a65c9bae45cbd8b29eb51f1d2400689517f26e",
+      "freeze_revision": "c92f27234512a9da4f428f038b52d422e0bbbec3",
+      "tree": "f0157dfb0ebfa07efa03f01601e138d8cd243dd7",
+      "isolated_report": "checks/verifier/s1-isolated-21a65c9-02/report.json",
+      "official_checks": {"passed": 147, "collected": 147, "claimed_stage": 1},
+      "independent_groups": 24,
+      "independent_requests": 928,
+      "populated_cross_process_import": "passed after source container destruction",
+      "coverage": "All 22 stage-1 matrix rows reviewed; no unresolved observed product defect",
+      "preserved_operational_failure": "checks/verifier/s1-isolated-21a65c9-01/report.json"
+    }
+  }
+}
