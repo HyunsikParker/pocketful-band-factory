@@ -13,6 +13,20 @@
       "populated_cross_process_import": "passed after source container destruction",
       "coverage": "All 22 stage-1 matrix rows reviewed; no unresolved observed product defect",
       "preserved_operational_failure": "checks/verifier/s1-isolated-21a65c9-01/report.json"
+    },
+    "2": {
+      "production_revision": "dc2b5f7c2983bde10f83df4ce0d2446328d80f5b",
+      "freeze_revision": "edd9d4c9a29fe76fc65f1ab61737dab108ce4c84",
+      "tree": "c56f4ad06c0cf9da50cf33c8fadff9aff9db8470",
+      "isolated_report": "checks/verifier/s2-isolated-dc2b5f7-01/report.json",
+      "official_checks": {"passed": 182, "collected": 182, "claimed_stage": 2},
+      "independent_groups": 57,
+      "populated_cross_process_import": "passed after source container destruction with existing insecure-HTTP browser session, unchanged body/key and no reload/relogin",
+      "coverage": "All 18 stage-2 matrix rows reviewed; genuine insecure-HTTP key-generation defect fixed and independently closed",
+      "interpretations": ["Exact positive TTL addition; RFC3339-unrepresentable deadlines rejected atomically422", "Stage2 static UI against actual Stage1 API before live browser upgrade"],
+      "acceptance_report": "checks/verifier/stage2-acceptance-dc2b5f7.md",
+      "preserved_product_failure": "checks/verifier/s2-independent-473b515-02/http-origin/report.json",
+      "preserved_operational_failure": "checks/verifier/s2-independent-473b515-01"
     }
   }
 }
