@@ -4,6 +4,7 @@ from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
+from pathlib import Path
 import re
 import sys
 from urllib.parse import parse_qs, urlsplit, unquote
@@ -16,7 +17,8 @@ def reject_constant(value):
 
 
 def parse_body(raw, path):
-    if not raw and re.fullmatch(r"/requests/[^/]+/(decline|cancel)", path):
+    if not raw and (re.fullmatch(r"/requests/[^/]+/(decline|cancel)", path)
+                    or re.fullmatch(r"/authorizations/[^/]+/void", path)):
         return {}
     try:
         body = json.loads(raw.decode("utf-8"), parse_float=Decimal,
@@ -41,6 +43,30 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "Pocketful"
     sys_version = ""
+
+    def serve_browser(self, path, accept):
+        """Fixed allowlist keeps HTML/static delivery independent of API auth."""
+        routes = {"/", "/requests", "/split", "/signup", "/login", "/authorizations"}
+        assets = {"/static/app.js": ("app.js", "text/javascript; charset=utf-8"),
+                  "/static/styles.css": ("styles.css", "text/css; charset=utf-8")}
+        if path in routes and "text/html" in accept.lower():
+            filename, mime = "index.html", "text/html; charset=utf-8"
+        elif path in assets:
+            filename, mime = assets[path]
+        else:
+            return False
+        data = (Path(__file__).parent / "static" / filename).read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", mime)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Vary", "Accept")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(data)
+        return True
 
     def log_message(self, *args):
         # URLs, authentication headers and test-state bodies must not enter logs.
@@ -84,6 +110,8 @@ class Handler(BaseHTTPRequestHandler):
                 raise ApiError(400, "malformed_request", "Invalid Content-Length.")
             length = int(lengths[0]) if lengths else 0
             raw = self.rfile.read(length) if length else b""
+            if self.command in {"GET", "HEAD"} and self.serve_browser(path, headers.get("accept", "")):
+                return
             body = parse_body(raw, path) if self.command in {"POST", "PUT", "PATCH"} else None
             status, response = self.server.engine.handle(self.command, path, query, body, headers)
             self.send_json(status, response)
