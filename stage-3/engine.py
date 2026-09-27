@@ -863,6 +863,16 @@ class Engine:
         state = deepcopy(body.get("state"))
         try:
             self._validate_state(state)
+            # Validate the replacement, never temporarily publish it on self.
+            # Ending balances alone cannot prove past total/available solvency.
+            candidate = Engine()
+            candidate.state = state
+            candidate._now = self._now
+            candidate._assert_history({})
+        except ApiError as error:
+            if error.code == "historical_overdraft":
+                fail()
+            raise
         except (KeyError, TypeError, ValueError, OverflowError, AttributeError, RecursionError):
             fail()
         return state
