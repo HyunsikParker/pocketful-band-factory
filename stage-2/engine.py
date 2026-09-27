@@ -1,4 +1,4 @@
-"""Pocketful stage-one domain engine.
+"""Pocketful stage-two domain engine.
 
 One lock is the transaction boundary for every read and write, including control
 operations and authentication. Receipts and idempotent responses are independent
@@ -6,7 +6,7 @@ copies; changing a request never changes an earlier response.
 """
 
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 import json
 import math
@@ -110,19 +110,23 @@ def fingerprint(body):
 
 
 def blank_state():
-    return {"schema": 1, "currency": "EUR", "minor_units": 2,
+    return {"schema": 2, "currency": "EUR", "minor_units": 2,
             "users": {}, "tokens": {}, "payments": {}, "requests": {},
             "splits": {}, "settlements": {}, "idempotency": {},
-            "settlement_operator_ids": [], "seeded_total": 0}
+            "settlement_operator_ids": [], "seeded_total": 0,
+            "authorization_ttl_seconds": 600, "authorizations": {},
+            "authorization_lifecycle": {}}
 
 
 class Engine:
     def __init__(self):
         self.lock = RLock()
         self.state = blank_state()
+        self._now = instant()
 
     def handle(self, method, path, query, body, headers):
         with self.lock:
+            self._now = instant()
             if method == "GET" and path == "/health":
                 return 200, {"status": "ok"}
             if method == "POST" and not isinstance(body, dict):
@@ -146,9 +150,11 @@ class Engine:
                 if user_id not in self.state["settlement_operator_ids"]:
                     fail("forbidden", 403)
             request_action = re.fullmatch(r"/requests/([^/]+)/(pay|decline|cancel)", path)
+            authorization_action = re.fullmatch(r"/authorizations/([^/]+)/(capture|void)", path)
             idempotent = method == "POST" and (
-                path in ("/payments", "/requests", "/splits", "/settlements")
-                or (request_action and request_action[2] == "pay"))
+                path in ("/payments", "/requests", "/splits", "/settlements", "/authorizations")
+                or (request_action and request_action[2] == "pay")
+                or (authorization_action and authorization_action[2] == "capture"))
             claim = None
             if idempotent:
                 key = headers.get("idempotency-key")
@@ -167,9 +173,11 @@ class Engine:
                 user = self.state["users"][user_id]
                 response = {"user_id": user_id, "display_name": user["display_name"],
                             "handle": user["handle"], "balance": user["balance"],
+                            "total": user["balance"], "held": self._held(user_id),
+                            "available": user["balance"] - self._held(user_id),
                             "currency": self.state["currency"], "minor_units": self.state["minor_units"]}
             elif method == "GET" and path == "/activity":
-                items = [p for p in self.state["payments"].values()
+                items = [dict(p, authorization_id=p.get("authorization_id")) for p in self.state["payments"].values()
                          if p["visibility"] == "public" or user_id in (p["from_user_id"], p["to_user_id"])]
                 response = self._page(items, query, "payments")
             elif method == "GET" and path == "/requests":
@@ -184,6 +192,23 @@ class Engine:
                          and (direction is None or r["payer_id" if direction == "incoming" else "requester_id"] == user_id)
                          and (status is None or r["status"] == status)]
                 response = self._page(items, query, "requests")
+            elif method == "GET" and path == "/authorizations":
+                direction = self._query(query, "direction")
+                status = self._query(query, "status")
+                if direction is not None and direction not in ("incoming", "outgoing"):
+                    fail()
+                if status is not None and status not in ("open", "captured", "voided", "expired"):
+                    fail()
+                items = [self._authorization_view(a) for a in self.state["authorizations"].values()
+                         if user_id in (a["from_user_id"], a["to_user_id"])
+                         and (direction is None or a["to_user_id" if direction == "incoming" else "from_user_id"] == user_id)]
+                if status is not None:
+                    items = [a for a in items if a["status"] == status]
+                response = self._page(items, query, "authorizations")
+            elif method == "POST" and path == "/authorizations":
+                response = self._authorize(user_id, body)
+            elif method == "POST" and authorization_action:
+                response = self._authorization_action(user_id, authorization_action[1], authorization_action[2], body)
             elif method == "POST" and path == "/payments":
                 recipient = self._user_by_handle(string(body, "to_handle"))
                 amount = integer(body.get("amount"), 1, 10**9)
@@ -243,19 +268,105 @@ class Engine:
     def _afford(self, deltas):
         for uid, delta in deltas.items():
             balance = self.state["users"][uid]["balance"] + delta
-            if balance < 0:
+            if balance - self._held(uid) < 0:
                 fail("insufficient_funds", 409)
             if balance > 2**53:
                 fail()
 
-    def _payment(self, sender, receiver, amount, memo, public, request_id=None, settlement_id=None, at=None, pid=None):
+    def _payment(self, sender, receiver, amount, memo, public, request_id=None, settlement_id=None, at=None, pid=None, authorization_id=None):
         users = self.state["users"]
         return {"payment_id": pid or new_id("p_"), "from_user_id": sender,
                 "from_handle": users[sender]["handle"], "to_user_id": receiver,
                 "to_handle": users[receiver]["handle"], "amount": amount,
                 "currency": self.state["currency"], "note": memo, "visibility": public,
                 "request_id": request_id, "settlement_id": settlement_id,
-                "created_at": at or instant()}
+                "authorization_id": authorization_id, "created_at": at or self._now}
+
+    def _authorization_view(self, authorization):
+        result = deepcopy(authorization)
+        if result["status"] == "open" and datetime.fromisoformat(result["expires_at"]) <= datetime.fromisoformat(self._now):
+            result["status"] = "expired"
+        result["remaining_amount"] = (result["amount"] - result["captured_amount"]
+                                      if result["status"] == "open" else 0)
+        return result
+
+    def _held(self, user_id):
+        return sum(self._authorization_view(a)["remaining_amount"]
+                   for a in self.state["authorizations"].values() if a["from_user_id"] == user_id)
+
+    @staticmethod
+    def _deadline(created_at, ttl):
+        """Reject an unrepresentable RFC3339 deadline, never falsify the TTL."""
+        try:
+            return (datetime.fromisoformat(created_at) + timedelta(seconds=ttl)).isoformat(timespec="microseconds")
+        except OverflowError:
+            fail()
+
+    def _authorize(self, user_id, body):
+        receiver = self._user_by_handle(string(body, "to_handle"))
+        amount = integer(body.get("amount"), 1, 10**9)
+        memo, public = note(body), visibility(body)
+        if receiver == user_id:
+            fail("self_payment")
+        self._afford({user_id: -amount})
+        expires = self._deadline(self._now, self.state["authorization_ttl_seconds"])
+        aid = new_id("a_")
+        authorization = {"authorization_id": aid, "from_user_id": user_id,
+                         "from_handle": self.state["users"][user_id]["handle"],
+                         "to_user_id": receiver, "to_handle": self.state["users"][receiver]["handle"],
+                         "amount": amount, "captured_amount": 0, "remaining_amount": amount,
+                         "currency": self.state["currency"], "note": memo, "visibility": public,
+                         "status": "open", "expires_at": expires,
+                         "created_at": self._now, "payment_id": None, "payment_ids": []}
+        self.state["authorizations"][aid] = authorization
+        self.state["authorization_lifecycle"][aid] = [
+            {"kind": "created", "at": self._now, "remaining_amount": amount}]
+        return authorization
+
+    def _authorization_action(self, user_id, aid, action, body):
+        authorization = self.state["authorizations"].get(aid)
+        if authorization is None:
+            fail("not_found", 404)
+        permitted = "to_user_id" if action == "capture" else "from_user_id"
+        if authorization[permitted] != user_id:
+            fail("forbidden", 403)
+        current = self._authorization_view(authorization)
+        if action == "void":
+            if current["status"] == "voided":
+                return current
+            if current["status"] != "open":
+                fail("authorization_not_open", 409)
+            authorization["status"], authorization["remaining_amount"] = "voided", 0
+            self.state["authorization_lifecycle"][aid].append(
+                {"kind": "voided", "at": self._now, "remaining_amount": 0})
+            return self._authorization_view(authorization)
+        if current["status"] == "expired":
+            fail("authorization_expired", 409)
+        if current["status"] != "open":
+            fail("authorization_not_open", 409)
+        amount = integer(body.get("amount", current["remaining_amount"]), 1)
+        if amount > current["remaining_amount"]:
+            fail("capture_exceeds_authorization")
+        final = body.get("final", True)
+        if not isinstance(final, bool):
+            fail("malformed_request", 400)
+        sender, receiver = authorization["from_user_id"], authorization["to_user_id"]
+        if self.state["users"][receiver]["balance"] + amount > 2**53:
+            fail()
+        payment = self._payment(sender, receiver, amount, authorization["note"], authorization["visibility"], authorization_id=aid)
+        self._commit_payments([payment])
+        authorization["captured_amount"] += amount
+        authorization["payment_id"] = payment["payment_id"]
+        authorization["payment_ids"].append(payment["payment_id"])
+        remaining = authorization["amount"] - authorization["captured_amount"]
+        if final or remaining == 0:
+            authorization["status"] = "captured"
+            remaining = 0
+        authorization["remaining_amount"] = remaining
+        self.state["authorization_lifecycle"][aid].append(
+            {"kind": "captured" if authorization["status"] == "captured" else "partial_capture",
+             "at": self._now, "remaining_amount": remaining, "payment_id": payment["payment_id"]})
+        return payment
 
     def _commit_payments(self, payments):
         deltas = {}
@@ -403,6 +514,7 @@ class Engine:
             fail()
         state["settlement_operator_ids"] = list(dict.fromkeys(operators))
         at = instant()
+        replacement._now = at
         for field in ("payments", "requests"):
             items = body.get(field, [])
             if not isinstance(items, list):
@@ -421,7 +533,8 @@ class Engine:
                     if not isinstance(sender, str) or not isinstance(receiver, str) or sender not in state["users"] or receiver not in state["users"] or sender == receiver:
                         fail()
                     record = replacement._payment(sender, receiver, amount, memo, visibility(item),
-                                                  request_id=item.get("request_id"), settlement_id=item.get("settlement_id"), at=created, pid=record_id)
+                                                  request_id=item.get("request_id"), settlement_id=item.get("settlement_id"), at=created, pid=record_id,
+                                                  authorization_id=item.get("authorization_id"))
                 else:
                     requester, payer = item.get("requester_id"), item.get("payer_id")
                     if not isinstance(requester, str) or not isinstance(payer, str) or requester not in state["users"] or payer not in state["users"] or requester == payer:
@@ -431,6 +544,52 @@ class Engine:
                         fail()
                     record = replacement._request(requester, payer, amount, memo, at=created, rid=record_id, status=status, payment_id=item.get("payment_id"))
                 state[field][record_id] = record
+        ttl = body.get("authorization_ttl_seconds", 600)
+        if isinstance(ttl, bool) or not isinstance(ttl, (int, float, Decimal)):
+            fail("malformed_request", 400)
+        state["authorization_ttl_seconds"] = integer(ttl, 1)
+        self._deadline(at, state["authorization_ttl_seconds"])
+        authorizations = body.get("authorizations", [])
+        if not isinstance(authorizations, list):
+            fail()
+        for item in authorizations:
+            if not isinstance(item, dict):
+                fail()
+            aid = item.get("id")
+            if not isinstance(aid, str) or not 1 <= len(aid) <= 64 or aid in state["authorizations"]:
+                fail()
+            sender, receiver = item.get("from_user_id"), item.get("to_user_id")
+            if not isinstance(sender, str) or not isinstance(receiver, str) or sender not in state["users"] or receiver not in state["users"] or sender == receiver:
+                fail()
+            amount = integer(item.get("amount"), 1, 10**9)
+            status = item.get("status", "open")
+            if not isinstance(status, str) or status not in ("open", "captured", "voided", "expired"):
+                fail()
+            captured = integer(item.get("captured_amount", amount if status == "captured" else 0), 0, amount)
+            if status == "open" and captured == amount:
+                fail()
+            created = self._timestamp(item.get("created_at", at))
+            expires = self._timestamp(item.get("expires_at"))
+            payment_ids = item.get("payment_ids", [item["payment_id"]] if item.get("payment_id") else [])
+            if not isinstance(payment_ids, list) or any(not isinstance(pid, str) or pid not in state["payments"] for pid in payment_ids):
+                fail()
+            if len(set(payment_ids)) != len(payment_ids):
+                fail()
+            authorization = {"authorization_id": aid, "from_user_id": sender,
+                             "from_handle": state["users"][sender]["handle"], "to_user_id": receiver,
+                             "to_handle": state["users"][receiver]["handle"], "amount": amount,
+                             "captured_amount": captured, "remaining_amount": amount - captured if status == "open" else 0,
+                             "currency": state["currency"], "note": note(item), "visibility": visibility(item),
+                             "status": status, "expires_at": expires, "created_at": created,
+                             "payment_id": payment_ids[-1] if payment_ids else None, "payment_ids": list(payment_ids)}
+            state["authorizations"][aid] = authorization
+            # A seeded closed hold has no recoverable earlier lifecycle; seeded
+            # open holds start at their supplied creation time (otherwise reset).
+            state["authorization_lifecycle"][aid] = [
+                {"kind": "created" if status == "open" else "seeded_closed", "at": created,
+                 "remaining_amount": authorization["remaining_amount"]}]
+        if any(user["balance"] - replacement._held(uid) < 0 for uid, user in state["users"].items()):
+            fail()
         return state
 
     def _import(self, body):
@@ -444,8 +603,9 @@ class Engine:
         return state
 
     def _validate_state(self, state):
-        if not isinstance(state, dict) or isinstance(state.get("schema"), bool) or state.get("schema") != 1:
+        if not isinstance(state, dict) or isinstance(state.get("schema"), bool) or state.get("schema") not in (1, 2):
             fail()
+        legacy = state["schema"] == 1
         for field in ("users", "tokens", "payments", "requests", "splits", "settlements", "idempotency"):
             if not isinstance(state.get(field), dict):
                 fail()
@@ -568,3 +728,72 @@ class Engine:
             return value
         clean(state)
         json.dumps(state, allow_nan=False)
+        if legacy:
+            # Do not augment any historical receipt or idempotent response: an
+            # old payment replay must retain the old response as a JSON value.
+            state.update(schema=2, authorization_ttl_seconds=600,
+                         authorizations={}, authorization_lifecycle={})
+        else:
+            self._validate_authorizations(state)
+
+    def _validate_authorizations(self, state):
+        state["authorization_ttl_seconds"] = integer(state.get("authorization_ttl_seconds"), 1)
+        authorizations, lifecycles = state.get("authorizations"), state.get("authorization_lifecycle")
+        if not isinstance(authorizations, dict) or not isinstance(lifecycles, dict) or set(authorizations) != set(lifecycles):
+            fail()
+        users, payments = state["users"], state["payments"]
+        held = {}
+        for aid, authorization in authorizations.items():
+            if not isinstance(authorization, dict) or authorization.get("authorization_id") != aid or not 1 <= len(aid) <= 64:
+                fail()
+            sender, receiver = authorization.get("from_user_id"), authorization.get("to_user_id")
+            if sender not in users or receiver not in users or sender == receiver:
+                fail()
+            if authorization.get("from_handle") != users[sender]["handle"] or authorization.get("to_handle") != users[receiver]["handle"]:
+                fail()
+            amount = integer(authorization.get("amount"), 1, 10**9)
+            captured = integer(authorization.get("captured_amount"), 0, amount)
+            status = authorization.get("status")
+            if status not in ("open", "captured", "voided", "expired") or (status == "open" and captured == amount):
+                fail()
+            remaining = integer(authorization.get("remaining_amount"), 0, amount)
+            if remaining != (amount - captured if status == "open" else 0):
+                fail()
+            if authorization.get("currency") != state["currency"]:
+                fail()
+            note(authorization)
+            visibility(authorization)
+            self._timestamp(authorization.get("created_at"))
+            self._timestamp(authorization.get("expires_at"))
+            payment_ids = authorization.get("payment_ids")
+            if not isinstance(payment_ids, list) or len(set(payment_ids)) != len(payment_ids):
+                fail()
+            if authorization.get("payment_id") != (payment_ids[-1] if payment_ids else None):
+                fail()
+            for pid in payment_ids:
+                payment = payments.get(pid)
+                if (not isinstance(payment, dict) or payment.get("authorization_id") != aid
+                        or payment.get("from_user_id") != sender or payment.get("to_user_id") != receiver
+                        or payment.get("request_id") is not None):
+                    fail()
+            # Seeded closed records can have a captured amount without a supplied
+            # prior capture; actual supplied captures still cannot exceed it.
+            if sum(payments[pid]["amount"] for pid in payment_ids) > captured:
+                fail()
+            events = lifecycles[aid]
+            if not isinstance(events, list) or not events:
+                fail()
+            previous_at = None
+            for event in events:
+                if not isinstance(event, dict) or event.get("kind") not in ("created", "seeded_closed", "partial_capture", "captured", "voided"):
+                    fail()
+                when = datetime.fromisoformat(self._timestamp(event.get("at")))
+                if previous_at is not None and when < previous_at:
+                    fail()
+                previous_at = when
+                integer(event.get("remaining_amount"), 0, amount)
+                if "payment_id" in event and event["payment_id"] not in payment_ids:
+                    fail()
+            held[sender] = held.get(sender, 0) + self._authorization_view(authorization)["remaining_amount"]
+        if any(users[uid]["balance"] < amount for uid, amount in held.items()):
+            fail()
